@@ -1,18 +1,28 @@
 import {
+  ArrowUpDown,
   BarChart3,
   Bell,
   BookmarkPlus,
   Bot,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleUserRound,
+  Clipboard,
+  ClipboardCheck,
+  ClipboardPaste,
   Copy,
+  Eraser,
   FileSpreadsheet,
+  FilePlus2,
+  Filter,
   FolderClosed,
   FunctionSquare,
   Grid2X2,
   History,
+  Link,
   LayoutTemplate,
+  MessageSquarePlus,
   MessageSquareText,
   MoreHorizontal,
   PanelRightClose,
@@ -22,9 +32,15 @@ import {
   Search,
   Send,
   Sparkles,
+  Scissors,
+  Settings2,
+  SquarePen,
   Table2,
+  Tag,
+  Trash2,
   X,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { FormEvent, MouseEvent, useMemo, useState } from 'react';
 import {
   baseRows,
@@ -989,11 +1005,36 @@ function TemplateColumn({ title, templates, emptyText }: { title: string; templa
 }
 
 function ContextMenu({ x, y, onRun }: { x: number; y: number; onRun: (label: string) => void }) {
-  const items = [
-    { icon: MessageSquareText, label: '用 DM AI 解释选区' },
-    { icon: FunctionSquare, label: '用 DM AI 补全公式' },
-    { icon: RefreshCw, label: '补全数据' },
-    { icon: BarChart3, label: '生成图表' },
+  type ContextMenuAction = { icon: LucideIcon; label: string; trailing?: LucideIcon };
+  type ContextMenuDivider = { type: 'divider' };
+
+  const pasteOptions: ContextMenuAction[] = [
+    { icon: ClipboardPaste, label: '粘贴' },
+    { icon: FunctionSquare, label: '公式' },
+    { icon: ClipboardCheck, label: '值' },
+    { icon: SquarePen, label: '格式' },
+    { icon: Table2, label: '数值格式' },
+    { icon: Link, label: '链接' },
+  ];
+
+  const items: (ContextMenuAction | ContextMenuDivider)[] = [
+    { icon: FilePlus2, label: '插入...' },
+    { icon: Trash2, label: '删除...' },
+    { icon: Eraser, label: '清除内容' },
+    { type: 'divider' },
+    { icon: Filter, label: '筛选' },
+    { icon: ArrowUpDown, label: '排序', trailing: ChevronRight },
+    { type: 'divider' },
+    { icon: MessageSquarePlus, label: '插入批注' },
+    { type: 'divider' },
+    { icon: Settings2, label: '设置单元格格式...' },
+    { icon: RefreshCw, label: '转换单元格...' },
+    { icon: Link, label: '超链接...' },
+    { type: 'divider' },
+    { icon: SquarePen, label: '编辑富文本...' },
+    { icon: Tag, label: '定义名称...' },
+    { icon: BookmarkPlus, label: '标签...' },
+    { icon: Clipboard, label: '默认值...' },
   ];
 
   return (
@@ -1002,21 +1043,41 @@ function ContextMenu({ x, y, onRun }: { x: number; y: number; onRun: (label: str
         <Sparkles size={15} />
         DM AI for selected
       </div>
-      {items.map(({ icon: Icon, label }) => (
-        <button key={label} onClick={() => onRun(label)}>
-          <Icon size={15} />
-          {label}
-        </button>
-      ))}
-      <div className="context-divider" />
-      <button>
-        <History size={15} />
-        查看 AI 操作记录
+      <button onClick={() => onRun('剪切')}>
+        <Scissors size={16} />
+        剪切
       </button>
-      <button>
-        <MoreHorizontal size={15} />
-        更多
+      <button onClick={() => onRun('复制')}>
+        <Copy size={16} />
+        复制
       </button>
+      <div className="paste-header">
+        <ClipboardPaste size={16} />
+        粘贴选项:
+      </div>
+      <div className="paste-options" aria-label="粘贴选项">
+        {pasteOptions.map(({ icon: Icon, label }) => (
+          <button key={label} title={label} aria-label={label} onClick={() => onRun(label)}>
+            <Icon size={18} />
+          </button>
+        ))}
+      </div>
+      {items.map((item, index) => {
+        if (!('label' in item)) {
+          return <div className="context-divider" key={`divider-${index}`} />;
+        }
+
+        const Icon = item.icon;
+        const Trailing = item.trailing;
+
+        return (
+          <button key={item.label} onClick={() => onRun(item.label)}>
+            <Icon size={16} />
+            <span>{item.label}</span>
+            {Trailing && <Trailing className="context-trailing" size={15} />}
+          </button>
+        );
+      })}
     </div>
   );
 }
