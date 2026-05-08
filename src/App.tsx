@@ -12,6 +12,7 @@ import {
   ClipboardCheck,
   ClipboardPaste,
   Copy,
+  Database,
   Eraser,
   FileSpreadsheet,
   FilePlus2,
@@ -22,15 +23,18 @@ import {
   History,
   Link,
   LayoutTemplate,
+  LineChart,
   MessageSquarePlus,
   MessageSquareText,
   MoreHorizontal,
+  Newspaper,
   PanelRightClose,
   Paperclip,
   Plus,
   RefreshCw,
   Search,
   Send,
+  ShieldCheck,
   Sparkles,
   Scissors,
   Settings2,
@@ -84,6 +88,65 @@ const initialSelection: CellSelection = {
 
 const contextReferences: AiContextChip[] = [{ id: 'ref_sheet1', type: 'reference', label: '@Sheet1' }];
 
+type ProductModule = {
+  id: string;
+  title: string;
+  subtitle: string;
+  status: string;
+  icon: LucideIcon;
+  tone: string;
+  summary: string;
+  flow: string[];
+  output: string;
+};
+
+const productModules: ProductModule[] = [
+  {
+    id: 'data-assistant',
+    title: '数据助手',
+    subtitle: 'Excel 提数 / 指标绑定',
+    status: '当前主功能',
+    icon: Database,
+    tone: 'blue',
+    summary: '围绕 Excel 选区识别指标、确认口径、批量刷新数据，并沉淀为可复用模板。',
+    flow: ['选中表格区域', '识别指标和年份', '确认数据口径', '刷新并审计来源'],
+    output: '结构化数值表、隐藏取数配置、可复用模板',
+  },
+  {
+    id: 'research-view',
+    title: '研报观点',
+    subtitle: '观点抽取 / 证据追踪',
+    status: '规划中',
+    icon: Newspaper,
+    tone: 'green',
+    summary: '把研报、纪要和公告拆成观点、论据、风险提示，并能回填到 Excel 或生成对比摘要。',
+    flow: ['上传研报材料', '抽取核心观点', '关联数据证据', '生成观点卡片'],
+    output: '观点摘要、原文出处、行业/主体标签',
+  },
+  {
+    id: 'credit-analysis',
+    title: '信用分析',
+    subtitle: '主体画像 / 风险预警',
+    status: '规划中',
+    icon: ShieldCheck,
+    tone: 'amber',
+    summary: '面向发行人和债项整合财务、舆情、估值、评级和条款信息，形成信用风险工作流。',
+    flow: ['输入主体或债券', '拉取财务和估值', '识别风险变化', '输出信用结论'],
+    output: '主体画像、风险因子、跟踪清单',
+  },
+  {
+    id: 'quant-backtest',
+    title: '量化回测',
+    subtitle: '策略验证 / 组合复盘',
+    status: '规划中',
+    icon: LineChart,
+    tone: 'purple',
+    summary: '支持用自然语言配置利率、信用、存单策略参数，回测收益、回撤和归因。',
+    flow: ['定义策略条件', '选择资产池和区间', '运行回测', '分析收益归因'],
+    output: '净值曲线、绩效指标、交易明细',
+  },
+];
+
 function App() {
   const [gridRows, setGridRows] = useState(baseRows);
   const [years, setYears] = useState(baseRows[0].slice(1, 8));
@@ -109,6 +172,7 @@ function App() {
   const [appliedNote, setAppliedNote] = useState('');
   const [activeSuggestionCell, setActiveSuggestionCell] = useState<string | null>(null);
   const [metricDrafts, setMetricDrafts] = useState<Record<string, string>>({});
+  const [activeModuleId, setActiveModuleId] = useState(productModules[0].id);
 
   const displayRows = useMemo(() => {
     const rows = gridRows.map((row) => [...row]);
@@ -137,6 +201,11 @@ function App() {
     }
     return getCellValue(displayRows, selection.activeCell);
   }, [displayRows, outputConfigs, selection.activeCell]);
+
+  const activeModule = useMemo(
+    () => productModules.find((module) => module.id === activeModuleId) ?? productModules[0],
+    [activeModuleId],
+  );
 
   const handleSelect = (address: string) => {
     setSelection({
@@ -370,33 +439,41 @@ function App() {
 
   return (
     <div className="terminal-shell" onClick={() => setMenu(null)}>
-      <TopBar />
+      <TopBar activeModuleId={activeModuleId} modules={productModules} onModuleSelect={setActiveModuleId} />
       <div className="workspace">
-        <LeftRail onOpenTemplates={() => setTemplateModalOpen(true)} customTemplateCount={customTemplates.length} />
-        <main className="excel-pane">
-          <WorkbookHeader />
-          <Ribbon
-            onRefresh={refreshOutputs}
-            onSaveTemplate={requestSaveTemplate}
-            onShowAudit={() => setFormulaPanelMode('audit')}
-            onExportTable={() => setFormulaPanelMode('export')}
-          />
-          <FormulaBar activeCell={selection.activeCell} value={selectedFormulaValue} />
-          <SpreadsheetGrid
-            rows={displayRows}
-            selection={selection}
-            years={years}
-            outputConfigs={outputConfigs}
-            activeSuggestionCell={activeSuggestionCell}
-            metricDrafts={metricDrafts}
-            onSelect={handleSelect}
-            onYearChange={updateYear}
-            onMetricDraftChange={(cell, value) => setMetricDrafts((current) => ({ ...current, [cell]: value }))}
-            onBindMetric={bindMetricToRow}
-            onContextMenu={openContextMenu}
-          />
-          <SheetFooter selectedRange={selection.address} />
-        </main>
+        <LeftRail
+          activeModule={activeModule}
+          onOpenTemplates={() => setTemplateModalOpen(true)}
+          customTemplateCount={customTemplates.length}
+        />
+        {activeModule.id === 'data-assistant' ? (
+          <main className="excel-pane">
+            <WorkbookHeader />
+            <Ribbon
+              onRefresh={refreshOutputs}
+              onSaveTemplate={requestSaveTemplate}
+              onShowAudit={() => setFormulaPanelMode('audit')}
+              onExportTable={() => setFormulaPanelMode('export')}
+            />
+            <FormulaBar activeCell={selection.activeCell} value={selectedFormulaValue} />
+            <SpreadsheetGrid
+              rows={displayRows}
+              selection={selection}
+              years={years}
+              outputConfigs={outputConfigs}
+              activeSuggestionCell={activeSuggestionCell}
+              metricDrafts={metricDrafts}
+              onSelect={handleSelect}
+              onYearChange={updateYear}
+              onMetricDraftChange={(cell, value) => setMetricDrafts((current) => ({ ...current, [cell]: value }))}
+              onBindMetric={bindMetricToRow}
+              onContextMenu={openContextMenu}
+            />
+            <SheetFooter selectedRange={selection.address} />
+          </main>
+        ) : (
+          <ModuleWorkspace module={activeModule} />
+        )}
         <AiPanel
           input={input}
           setInput={setInput}
@@ -432,7 +509,15 @@ function App() {
   );
 }
 
-function TopBar() {
+function TopBar({
+  activeModuleId,
+  modules,
+  onModuleSelect,
+}: {
+  activeModuleId: string;
+  modules: ProductModule[];
+  onModuleSelect: (moduleId: string) => void;
+}) {
   return (
     <header className="topbar">
       <div className="brand">
@@ -442,6 +527,21 @@ function TopBar() {
         </strong>
         <em>Intl.</em>
       </div>
+      <nav className="global-modules" aria-label="一级能力导航">
+        {modules.map((module) => {
+          const Icon = module.icon;
+          return (
+            <button
+              className={activeModuleId === module.id ? 'active' : ''}
+              key={module.id}
+              onClick={() => onModuleSelect(module.id)}
+            >
+              <Icon size={14} />
+              {module.title}
+            </button>
+          );
+        })}
+      </nav>
       <div className="top-actions">
         <Bell size={16} />
         <MessageSquareText size={16} />
@@ -453,31 +553,103 @@ function TopBar() {
   );
 }
 
-function LeftRail({ onOpenTemplates, customTemplateCount }: { onOpenTemplates: () => void; customTemplateCount: number }) {
-  const workspaces = ['本命名.xlsx', '海底捞.HK', '奥海科技', '腾讯控股.HK', '紫金矿业', '宁德时代', '新易盛', '中际旭创'];
+function LeftRail({
+  activeModule,
+  onOpenTemplates,
+  customTemplateCount,
+}: {
+  activeModule: ProductModule;
+  onOpenTemplates: () => void;
+  customTemplateCount: number;
+}) {
+  const workspaces = ['资金', '利率债', '信用债', '存单'];
 
   return (
     <aside className="left-rail">
-      <h2>我的工作台</h2>
-      <button className="rail-item active" onClick={onOpenTemplates}>
-        <LayoutTemplate size={16} />
-        模板广场
-        <span>{customTemplateCount ? `我的 ${customTemplateCount}` : '模板中心'}</span>
-      </button>
-      <div className="rail-section">
-        <div className="rail-section-title">
-          <strong>工作区</strong>
-          <Search size={14} />
-          <Plus size={14} />
-        </div>
-        {workspaces.map((item) => (
-          <div className="file-row" key={item}>
-            <FolderClosed size={14} />
-            <span>{item}</span>
+      <h2>{activeModule.title}</h2>
+      {activeModule.id === 'data-assistant' ? (
+        <>
+          <button className="rail-item active" onClick={onOpenTemplates}>
+            <LayoutTemplate size={16} />
+            模板广场
+            <span>{customTemplateCount ? `我的 ${customTemplateCount}` : '模板中心'}</span>
+          </button>
+          <div className="rail-section">
+            <div className="rail-section-title">
+              <strong>工作区</strong>
+              <Search size={14} />
+              <Plus size={14} />
+            </div>
+            {workspaces.map((item) => (
+              <div className="file-row" key={item}>
+                <FolderClosed size={14} />
+                <span>{item}</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      ) : (
+        <ModuleRail module={activeModule} />
+      )}
     </aside>
+  );
+}
+
+function ModuleRail({ module }: { module: ProductModule }) {
+  const sections = {
+    'research-view': ['观点库', '研报收件箱', '主题跟踪', '证据摘录'],
+    'credit-analysis': ['主体池', '债项跟踪', '风险预警', '评级变动'],
+    'quant-backtest': ['策略库', '资产池', '回测任务', '绩效归因'],
+  }[module.id] ?? ['工作台', '任务', '输出'];
+
+  return (
+    <div className="rail-section">
+      <div className="rail-section-title">
+        <strong>模块资源</strong>
+        <Plus size={14} />
+      </div>
+      {sections.map((item, index) => (
+        <div className={`file-row ${index === 0 ? 'active-resource' : ''}`} key={item}>
+          <FolderClosed size={14} />
+          <span>{item}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ModuleWorkspace({ module }: { module: ProductModule }) {
+  const Icon = module.icon;
+
+  return (
+    <main className="module-workspace">
+      <section className={`module-hero ${module.tone}`}>
+        <div className="module-hero-title">
+          <Icon size={24} />
+          <div>
+            <strong>{module.title}</strong>
+            <span>{module.subtitle}</span>
+          </div>
+          <b>{module.status}</b>
+        </div>
+        <p>{module.summary}</p>
+      </section>
+      <section className="module-board">
+        <div className="module-board-head">
+          <strong>未来工作流</strong>
+          <span>{module.output}</span>
+        </div>
+        <div className="module-stage-grid">
+          {module.flow.map((step, index) => (
+            <article className="module-stage" key={step}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <strong>{step}</strong>
+              <p>{moduleStageCopy(module.id, index)}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
   );
 }
 
@@ -1126,6 +1298,31 @@ function statusText(status: OutputStatus) {
     ready: '已刷新',
     failed: '失败',
   }[status];
+}
+
+function moduleStageCopy(moduleId: string, index: number) {
+  const copies: Record<string, string[]> = {
+    'research-view': [
+      '支持研报、纪要、公告等材料进入统一收件箱。',
+      '抽取多空观点、时间判断、品种偏好和风险提示。',
+      '把观点背后的数据、图表和原文段落保留为证据链。',
+      '沉淀为可筛选、可引用、可回填的观点卡片。',
+    ],
+    'credit-analysis': [
+      '从主体、债券代码或持仓清单进入分析流程。',
+      '汇总财务、估值、成交、评级、舆情和条款信息。',
+      '识别利差走阔、评级调整、负面舆情等变化。',
+      '输出主体画像、风险结论和后续跟踪动作。',
+    ],
+    'quant-backtest': [
+      '用自然语言或表格条件描述策略规则。',
+      '选择利率债、信用债、存单等资产池和调仓频率。',
+      '运行历史区间回测，记录净值、换手和回撤。',
+      '拆解久期、票息、利差、择券和交易贡献。',
+    ],
+  };
+
+  return copies[moduleId]?.[index] ?? '这里会承接该能力的核心任务、过程状态和输出结果。';
 }
 
 function isMetricInputCell(address: string) {
