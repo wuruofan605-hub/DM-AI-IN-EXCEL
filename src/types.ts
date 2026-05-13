@@ -28,6 +28,23 @@ export type OutputCellConfig = {
   status: OutputStatus;
   lastRefreshAt?: string;
   value?: string;
+  fetchInterface?: string;
+  fieldName?: string;
+  parameterCell?: string;
+};
+
+export type TemplateObjectScope = 'issuer' | 'bond' | 'bond_set';
+
+export type TemplateParamSlot = {
+  name: string;
+  description: string;
+  placeholder: string;
+};
+
+export type HiddenFetchConfig = {
+  interfaceName: string;
+  parameterMapping: Record<string, string>;
+  fieldMapping: Record<string, string>;
 };
 
 export type TemplateConfig = {
@@ -40,6 +57,12 @@ export type TemplateConfig = {
   refreshRules: string;
   formatPreset: string;
   type: 'default' | 'custom';
+  applicableObject: TemplateObjectScope;
+  requiredParams: TemplateParamSlot[];
+  optionalParams: TemplateParamSlot[];
+  defaultOutputFields: string[];
+  hiddenFetchConfig: HiddenFetchConfig;
+  previewRows: string[][];
 };
 
 export type AiContextChip = {

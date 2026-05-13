@@ -173,6 +173,11 @@ function App() {
   const [activeSuggestionCell, setActiveSuggestionCell] = useState<string | null>(null);
   const [metricDrafts, setMetricDrafts] = useState<Record<string, string>>({});
   const [activeModuleId, setActiveModuleId] = useState(productModules[0].id);
+  const [viewMode, setViewMode] = useState<'templateHome' | 'workbook'>('templateHome');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [templatePickerSearch, setTemplatePickerSearch] = useState('');
 
   const displayRows = useMemo(() => {
     const rows = gridRows.map((row) => [...row]);
@@ -197,7 +202,7 @@ function App() {
   const selectedFormulaValue = useMemo(() => {
     const config = outputConfigs[selection.activeCell];
     if (config) {
-      return `隐藏取数配置: DMDATA(${config.metricCode}, ${config.yearCell})`;
+      return `隐藏取数配置: ${config.fetchInterface ?? 'DMDATA'}(${config.metricCode}; param=${config.parameterCell ?? config.metricCell}; field=${config.fieldName ?? config.yearCell})`;
     }
     return getCellValue(displayRows, selection.activeCell);
   }, [displayRows, outputConfigs, selection.activeCell]);
@@ -207,6 +212,17 @@ function App() {
     [activeModuleId],
   );
 
+  const selectedTemplate = useMemo(
+    () => defaultTemplates.find((template) => template.templateId === selectedTemplateId) ?? null,
+    [selectedTemplateId],
+  );
+
+  const filteredTemplates = useMemo(() => {
+    return filterTemplates(defaultTemplates, templateSearch);
+  }, [templateSearch]);
+
+  const pickerTemplates = useMemo(() => filterTemplates(defaultTemplates, templatePickerSearch), [templatePickerSearch]);
+
   const handleSelect = (address: string) => {
     setSelection({
       sheetId: workbook.activeSheetId,
@@ -214,7 +230,7 @@ function App() {
       address,
       activeCell: address.split(':')[0],
     });
-    setActiveSuggestionCell(isMetricInputCell(address) ? address : null);
+    setActiveSuggestionCell(!selectedTemplate && isMetricInputCell(address) ? address : null);
   };
 
   const updateYear = (columnIndex: number, value: string) => {
@@ -401,6 +417,24 @@ function App() {
       refreshRules: saveDraft.refreshRules,
       formatPreset: saveDraft.formatPreset,
       type: 'custom',
+      applicableObject: 'bond_set',
+      requiredParams: [
+        { name: '指标或证券代码', description: '从当前输入区保存的核心参数。', placeholder: '沿用当前工作表输入区' },
+      ],
+      optionalParams: [
+        { name: '时间或筛选条件', description: '从当前表头和筛选条件保存。', placeholder: '沿用当前工作表表头' },
+      ],
+      defaultOutputFields: years.filter(Boolean),
+      hiddenFetchConfig: {
+        interfaceName: 'DM_CUSTOM_TEMPLATE',
+        parameterMapping: { inputRange: saveDraft.inputRanges.join(',') },
+        fieldMapping: Object.fromEntries(years.filter(Boolean).map((year) => [year, year])),
+      },
+      previewRows: [
+        ['输入区', saveDraft.inputRanges.join(' / '), ''],
+        ['输出区', saveDraft.outputRange, ''],
+        ['规则', saveDraft.refreshRules, ''],
+      ],
     };
     setCustomTemplates((current) => [template, ...current]);
     setSaveDraft({ ...saveDraft, status: 'saved' });
@@ -437,72 +471,164 @@ function App() {
     setMenu(null);
   };
 
+  const openBlankWorkbook = () => {
+    setTemplatePickerOpen(false);
+    setSelectedTemplateId(null);
+    setGridRows(baseRows);
+    const initialYears = baseRows[0].slice(1, 8);
+    setYears(initialYears);
+    setMetricBindings(initialMetricBindings);
+    setOutputConfigs(buildInitialOutputConfigs(initialYears, initialMetricBindings));
+    setMetricDrafts({});
+    setSelection(initialSelection);
+    setViewMode('workbook');
+    setMessages((current) => [
+      ...current,
+      {
+        id: `assistant_blank_${Date.now()}`,
+        role: 'assistant',
+        text: '已进入新建空白表。你也可以回到模板库，从债券取数模板开始，减少从空白表猜字段的成本。',
+      },
+    ]);
+  };
+
+  const applyTemplate = (template: TemplateConfig) => {
+    const workbookState = buildTemplateWorkbook(template);
+    setTemplatePickerOpen(false);
+    setSelectedTemplateId(template.templateId);
+    setGridRows(workbookState.rows);
+    setYears(workbookState.headers);
+    setMetricBindings([]);
+    setOutputConfigs(workbookState.outputConfigs);
+    setMetricDrafts(workbookState.metricDrafts);
+    setSelection({
+      sheetId: workbook.activeSheetId,
+      sheetName: workbook.activeSheetName,
+      address: 'A2',
+      activeCell: 'A2',
+    });
+    setActiveSuggestionCell(null);
+    setViewMode('workbook');
+    setFormulaPanelMode('audit');
+    setMessages((current) => [
+      ...current,
+      {
+        id: `assistant_template_${Date.now()}`,
+        role: 'assistant',
+        text: `当前已套用「${template.templateName}」。我已经放好必填参数、可选参数、默认输出字段和隐藏取数配置，后续刷新会按 ${template.hiddenFetchConfig.interfaceName} 的字段映射执行。`,
+      },
+    ]);
+  };
+
   return (
     <div className="terminal-shell" onClick={() => setMenu(null)}>
-      <TopBar activeModuleId={activeModuleId} modules={productModules} onModuleSelect={setActiveModuleId} />
-      <div className="workspace">
-        <LeftRail
-          activeModule={activeModule}
-          onOpenTemplates={() => setTemplateModalOpen(true)}
-          customTemplateCount={customTemplates.length}
-        />
-        {activeModule.id === 'data-assistant' ? (
-          <main className="excel-pane">
-            <WorkbookHeader />
-            <Ribbon
-              onRefresh={refreshOutputs}
-              onSaveTemplate={requestSaveTemplate}
-              onShowAudit={() => setFormulaPanelMode('audit')}
-              onExportTable={() => setFormulaPanelMode('export')}
-            />
-            <FormulaBar activeCell={selection.activeCell} value={selectedFormulaValue} />
-            <SpreadsheetGrid
-              rows={displayRows}
-              selection={selection}
-              years={years}
-              outputConfigs={outputConfigs}
-              activeSuggestionCell={activeSuggestionCell}
-              metricDrafts={metricDrafts}
-              onSelect={handleSelect}
-              onYearChange={updateYear}
-              onMetricDraftChange={(cell, value) => setMetricDrafts((current) => ({ ...current, [cell]: value }))}
-              onBindMetric={bindMetricToRow}
-              onContextMenu={openContextMenu}
-            />
-            <SheetFooter selectedRange={selection.address} />
-          </main>
-        ) : (
-          <ModuleWorkspace module={activeModule} />
-        )}
-        <AiPanel
-          input={input}
-          setInput={setInput}
-          selectedChip={selectedChip}
-          messages={messages}
-          confirmationCard={confirmationCard}
-          saveDraft={saveDraft}
-          appliedNote={appliedNote}
-          outputConfigs={outputConfigs}
-          metricBindings={metricBindings}
-          formulaPanelMode={formulaPanelMode}
-          onSubmit={handleSubmit}
-          onMetricChoice={(metricCode) =>
-            confirmationCard && setConfirmationCard({ ...confirmationCard, selectedMetricCode: metricCode })
-          }
-          onConfirmMetric={confirmMetricBinding}
-          onCancelMetric={() => confirmationCard && setConfirmationCard({ ...confirmationCard, status: 'cancelled' })}
-          onTemplateNameChange={(templateName) => saveDraft && setSaveDraft({ ...saveDraft, templateName })}
-          onConfirmSaveTemplate={confirmSaveTemplate}
-          onCancelSaveTemplate={() => saveDraft && setSaveDraft({ ...saveDraft, status: 'cancelled' })}
-          onCloseFormulaPanel={() => setFormulaPanelMode(null)}
-        />
-      </div>
+      <TopBar
+        activeModuleId={activeModuleId}
+        modules={productModules}
+        onModuleSelect={(moduleId) => {
+          setActiveModuleId(moduleId);
+          if (moduleId === 'data-assistant') setViewMode('templateHome');
+        }}
+      />
+      {activeModule.id === 'data-assistant' && viewMode === 'templateHome' ? (
+        <div className="template-home-layout">
+          <LeftRail
+            activeModule={activeModule}
+            onOpenTemplates={() => setViewMode('templateHome')}
+            onOpenTemplatePicker={() => {
+              setTemplatePickerSearch('');
+              setTemplatePickerOpen(true);
+            }}
+            customTemplateCount={customTemplates.length}
+          />
+          <TemplateHome
+            templates={filteredTemplates}
+            search={templateSearch}
+            onSearchChange={setTemplateSearch}
+            onOpenTemplate={applyTemplate}
+            onOpenBlank={openBlankWorkbook}
+          />
+        </div>
+      ) : (
+        <div className="workspace">
+          <LeftRail
+            activeModule={activeModule}
+            onOpenTemplates={() => setViewMode('templateHome')}
+            onOpenTemplatePicker={() => {
+              setTemplatePickerSearch('');
+              setTemplatePickerOpen(true);
+            }}
+            customTemplateCount={customTemplates.length}
+          />
+          {activeModule.id === 'data-assistant' ? (
+            <main className="excel-pane">
+              <WorkbookHeader selectedTemplate={selectedTemplate} onBackToTemplates={() => setViewMode('templateHome')} />
+              <Ribbon
+                onRefresh={refreshOutputs}
+                onSaveTemplate={requestSaveTemplate}
+                onShowAudit={() => setFormulaPanelMode('audit')}
+                onExportTable={() => setFormulaPanelMode('export')}
+              />
+              <FormulaBar activeCell={selection.activeCell} value={selectedFormulaValue} />
+              <SpreadsheetGrid
+                rows={displayRows}
+                selection={selection}
+                years={years}
+                outputConfigs={outputConfigs}
+                activeSuggestionCell={activeSuggestionCell}
+                enableMetricSuggestions={!selectedTemplate}
+                metricDrafts={metricDrafts}
+                onSelect={handleSelect}
+                onYearChange={updateYear}
+                onMetricDraftChange={(cell, value) => setMetricDrafts((current) => ({ ...current, [cell]: value }))}
+                onBindMetric={bindMetricToRow}
+                onContextMenu={openContextMenu}
+              />
+              <SheetFooter selectedRange={selection.address} />
+            </main>
+          ) : (
+            <ModuleWorkspace module={activeModule} />
+          )}
+          <AiPanel
+            input={input}
+            setInput={setInput}
+            selectedChip={selectedChip}
+            messages={messages}
+            confirmationCard={confirmationCard}
+            saveDraft={saveDraft}
+            appliedNote={appliedNote}
+            outputConfigs={outputConfigs}
+            metricBindings={metricBindings}
+            formulaPanelMode={formulaPanelMode}
+            onSubmit={handleSubmit}
+            onMetricChoice={(metricCode) =>
+              confirmationCard && setConfirmationCard({ ...confirmationCard, selectedMetricCode: metricCode })
+            }
+            onConfirmMetric={confirmMetricBinding}
+            onCancelMetric={() => confirmationCard && setConfirmationCard({ ...confirmationCard, status: 'cancelled' })}
+            onTemplateNameChange={(templateName) => saveDraft && setSaveDraft({ ...saveDraft, templateName })}
+            onConfirmSaveTemplate={confirmSaveTemplate}
+            onCancelSaveTemplate={() => saveDraft && setSaveDraft({ ...saveDraft, status: 'cancelled' })}
+            onCloseFormulaPanel={() => setFormulaPanelMode(null)}
+          />
+        </div>
+      )}
       {menu && <ContextMenu x={menu.x} y={menu.y} onRun={runMenuAction} />}
       {templateModalOpen && (
         <TemplateGalleryModal
           defaultTemplates={defaultTemplates}
           customTemplates={customTemplates}
           onClose={() => setTemplateModalOpen(false)}
+        />
+      )}
+      {templatePickerOpen && (
+        <TemplatePickerModal
+          templates={pickerTemplates}
+          search={templatePickerSearch}
+          onSearchChange={setTemplatePickerSearch}
+          onOpenTemplate={applyTemplate}
+          onOpenBlank={openBlankWorkbook}
+          onClose={() => setTemplatePickerOpen(false)}
         />
       )}
     </div>
@@ -556,10 +682,12 @@ function TopBar({
 function LeftRail({
   activeModule,
   onOpenTemplates,
+  onOpenTemplatePicker,
   customTemplateCount,
 }: {
   activeModule: ProductModule;
   onOpenTemplates: () => void;
+  onOpenTemplatePicker: () => void;
   customTemplateCount: number;
 }) {
   const workspaces = ['资金', '利率债', '信用债', '存单'];
@@ -578,7 +706,9 @@ function LeftRail({
             <div className="rail-section-title">
               <strong>工作区</strong>
               <Search size={14} />
-              <Plus size={14} />
+              <button type="button" className="rail-icon-button" onClick={onOpenTemplatePicker} aria-label="新建工作区">
+                <Plus size={14} />
+              </button>
             </div>
             {workspaces.map((item) => (
               <div className="file-row" key={item}>
@@ -653,13 +783,163 @@ function ModuleWorkspace({ module }: { module: ProductModule }) {
   );
 }
 
-function WorkbookHeader() {
+function TemplateHome({
+  templates,
+  search,
+  onSearchChange,
+  onOpenTemplate,
+  onOpenBlank,
+}: {
+  templates: TemplateConfig[];
+  search: string;
+  onSearchChange: (value: string) => void;
+  onOpenTemplate: (template: TemplateConfig) => void;
+  onOpenBlank: () => void;
+}) {
+  const recommended = templates.slice(0, 7);
+  const latest = templates.slice().reverse().slice(0, 4);
+
+  return (
+    <main className="template-home">
+      <section className="template-home-toolbar">
+        <label className="template-search">
+          <Search size={22} />
+          <input
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="搜索模板：城投、评级、余额、估值"
+            aria-label="搜索模板"
+          />
+        </label>
+      </section>
+      <section className="template-home-content">
+        <div className="template-section-title">
+          <h1>为你推荐</h1>
+          <span>债券取数模板</span>
+        </div>
+        <div className="template-card-grid">
+          <button className="template-blank-card" type="button" onClick={onOpenBlank}>
+            <Plus size={58} />
+            <strong>新建空白表</strong>
+            <span>从空白表开始，适合临时探索</span>
+          </button>
+          {recommended.map((template) => (
+            <TemplateLibraryCard template={template} key={template.templateId} onOpen={() => onOpenTemplate(template)} />
+          ))}
+        </div>
+        <div className="template-section-title latest">
+          <h2>最新</h2>
+          <span>最近更新模板</span>
+          <button type="button">查看更多</button>
+        </div>
+        <div className="template-card-grid compact">
+          {latest.map((template) => (
+            <TemplateLibraryCard template={template} key={`latest-${template.templateId}`} onOpen={() => onOpenTemplate(template)} />
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function TemplateLibraryCard({ template, onOpen }: { template: TemplateConfig; onOpen: () => void }) {
+  return (
+    <button className="template-library-card" type="button" onClick={onOpen}>
+      <div className="template-card-heading">
+        <span className="template-app-icon">
+          <Grid2X2 size={15} />
+        </span>
+        <strong>{template.templateName}</strong>
+      </div>
+      <div className="template-preview-table">
+        {template.previewRows.map((row, rowIndex) => (
+          <div className="template-preview-row" key={`${template.templateId}-${rowIndex}`}>
+            {row.map((cell, cellIndex) => (
+              <span key={`${template.templateId}-${rowIndex}-${cellIndex}`}>{cell}</span>
+            ))}
+          </div>
+        ))}
+      </div>
+      <div className="template-boundary">
+        <span>适用对象：{objectScopeText(template.applicableObject)}</span>
+        <span>必填：{template.requiredParams.map((param) => param.name).join('、')}</span>
+        <span>输出：{template.defaultOutputFields.slice(0, 4).join('、')}</span>
+      </div>
+      <code>{template.hiddenFetchConfig.interfaceName}</code>
+    </button>
+  );
+}
+
+function TemplatePickerModal({
+  templates,
+  search,
+  onSearchChange,
+  onOpenTemplate,
+  onOpenBlank,
+  onClose,
+}: {
+  templates: TemplateConfig[];
+  search: string;
+  onSearchChange: (value: string) => void;
+  onOpenTemplate: (template: TemplateConfig) => void;
+  onOpenBlank: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop template-picker-backdrop" onClick={onClose}>
+      <section className="template-picker-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="template-picker-header">
+          <label className="template-search picker-search">
+            <Search size={22} />
+            <input
+              value={search}
+              onChange={(event) => onSearchChange(event.target.value)}
+              placeholder="搜索模板：城投、评级、余额、估值"
+              aria-label="搜索弹窗模板"
+            />
+          </label>
+          <button type="button" onClick={onClose} aria-label="关闭模板选择">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="template-picker-content">
+          <div className="template-section-title">
+            <h1>为你推荐</h1>
+            <span>债券取数模板</span>
+          </div>
+          <div className="template-card-grid picker">
+            <button className="template-blank-card" type="button" onClick={onOpenBlank}>
+              <Plus size={58} />
+              <strong>新建空白表</strong>
+              <span>从空白表开始，适合临时探索</span>
+            </button>
+            {templates.map((template) => (
+              <TemplateLibraryCard
+                template={template}
+                key={`picker-${template.templateId}`}
+                onOpen={() => onOpenTemplate(template)}
+              />
+            ))}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function WorkbookHeader({
+  selectedTemplate,
+  onBackToTemplates,
+}: {
+  selectedTemplate: TemplateConfig | null;
+  onBackToTemplates: () => void;
+}) {
   return (
     <section className="workbook-header">
       <div className="tabs">
         <div className="file-tab active">
           <FileSpreadsheet size={14} />
-          海底捞利润表_2021-2025.xlsx
+          {selectedTemplate ? `${selectedTemplate.templateName}.xlsx` : '海底捞利润表_2021-2025.xlsx'}
           <X size={13} />
         </div>
         <div className="file-tab">
@@ -669,8 +949,9 @@ function WorkbookHeader() {
         <button className="tab-plus">+</button>
       </div>
       <div className="pathline">
-        tree &gt; ... &gt; 海底捞利润表_2021-2025.xlsx
+        tree &gt; 模板库 &gt; {selectedTemplate?.templateName ?? '新建空白表'}
         <span>最近修改: 05月07 15:46</span>
+        <button type="button" onClick={onBackToTemplates}>返回模板库</button>
       </div>
     </section>
   );
@@ -750,6 +1031,7 @@ function SpreadsheetGrid({
   years,
   outputConfigs,
   activeSuggestionCell,
+  enableMetricSuggestions,
   metricDrafts,
   onSelect,
   onYearChange,
@@ -762,6 +1044,7 @@ function SpreadsheetGrid({
   years: string[];
   outputConfigs: Record<string, OutputCellConfig>;
   activeSuggestionCell: string | null;
+  enableMetricSuggestions: boolean;
   metricDrafts: Record<string, string>;
   onSelect: (address: string) => void;
   onYearChange: (columnIndex: number, value: string) => void;
@@ -772,7 +1055,7 @@ function SpreadsheetGrid({
   const rowCount = 55;
   const activeSuggestionRow = activeSuggestionCell ? parseCell(activeSuggestionCell).row : 0;
   const activeQuery = activeSuggestionCell ? metricDrafts[activeSuggestionCell] ?? getCellValue(rows, activeSuggestionCell) : '';
-  const suggestions = activeSuggestionCell ? findMetricCandidates(activeQuery) : [];
+  const suggestions = activeSuggestionCell && enableMetricSuggestions ? findMetricCandidates(activeQuery) : [];
 
   return (
     <section className="grid-wrap" onContextMenu={(event) => onContextMenu(event, selection.address)}>
@@ -847,7 +1130,7 @@ function SpreadsheetGrid({
           })}
         </tbody>
       </table>
-      {activeSuggestionCell && (
+      {activeSuggestionCell && enableMetricSuggestions && (
         <div className="suggestion-popover" style={{ top: 78 + activeSuggestionRow * 22 }}>
           <div className="suggestion-title">
             <Search size={14} />
@@ -1298,6 +1581,78 @@ function statusText(status: OutputStatus) {
     ready: '已刷新',
     failed: '失败',
   }[status];
+}
+
+function objectScopeText(scope: TemplateConfig['applicableObject']) {
+  return {
+    issuer: '主体',
+    bond: '债券',
+    bond_set: '债券集合',
+  }[scope];
+}
+
+function filterTemplates(templates: TemplateConfig[], search: string) {
+  const query = search.trim().toLowerCase();
+  if (!query) return templates;
+  return templates.filter((template) => {
+    const haystack = [
+      template.templateName,
+      template.description,
+      objectScopeText(template.applicableObject),
+      ...template.requiredParams.map((param) => `${param.name} ${param.description}`),
+      ...template.optionalParams.map((param) => `${param.name} ${param.description}`),
+      ...template.defaultOutputFields,
+      template.hiddenFetchConfig.interfaceName,
+    ]
+      .join(' ')
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function buildTemplateWorkbook(template: TemplateConfig) {
+  const headers = template.defaultOutputFields.slice(0, 7);
+  const rows: string[][] = Array.from({ length: 55 }, () => Array.from({ length: 16 }, () => ''));
+  const metricDrafts: Record<string, string> = {};
+  const outputConfigs: Record<string, OutputCellConfig> = {};
+  const slots = [
+    ...template.requiredParams.map((param) => ({ ...param, required: true })),
+    ...template.optionalParams.map((param) => ({ ...param, required: false })),
+  ].slice(0, 12);
+
+  rows[0] = ['参数槽位', ...headers, ...Array.from({ length: Math.max(0, 15 - headers.length) }, () => '')];
+  slots.forEach((slot, index) => {
+    const rowIndex = index + 1;
+    const cell = `A${rowIndex + 1}`;
+    rows[rowIndex][0] = `${slot.required ? '必填' : '可选'}｜${slot.name}`;
+    metricDrafts[cell] = slot.placeholder;
+    headers.forEach((fieldName, headerIndex) => {
+      const columnIndex = headerIndex + 2;
+      const targetCell = makeCellAddress(columnIndex, rowIndex + 1);
+      const fieldKey = template.hiddenFetchConfig.fieldMapping[fieldName] ?? fieldName;
+      outputConfigs[targetCell] = {
+        targetCell,
+        metricCell: cell,
+        yearCell: `${columns[columnIndex - 1]}1`,
+        metricCode: `${template.hiddenFetchConfig.interfaceName}.${fieldKey}`,
+        year: fieldName,
+        status: 'pendingRefresh',
+        value: '',
+        fetchInterface: template.hiddenFetchConfig.interfaceName,
+        fieldName,
+        parameterCell: cell,
+      };
+    });
+  });
+
+  rows[slots.length + 2][0] = '隐藏取数接口';
+  rows[slots.length + 2][1] = template.hiddenFetchConfig.interfaceName;
+  rows[slots.length + 3][0] = '参数映射';
+  rows[slots.length + 3][1] = Object.entries(template.hiddenFetchConfig.parameterMapping)
+    .map(([key, cell]) => `${key}=${cell}`)
+    .join('; ');
+
+  return { rows, headers, outputConfigs, metricDrafts };
 }
 
 function moduleStageCopy(moduleId: string, index: number) {
