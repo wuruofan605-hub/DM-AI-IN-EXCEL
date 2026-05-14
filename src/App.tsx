@@ -42,12 +42,10 @@ import {
   Table2,
   Tag,
   Trash2,
-  UploadCloud,
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { ChangeEvent, FormEvent, MouseEvent, useMemo, useState } from 'react';
-import * as XLSX from 'xlsx';
+import { FormEvent, MouseEvent, useMemo, useState } from 'react';
 import {
   baseRows,
   buildInitialOutputConfigs,
@@ -89,42 +87,6 @@ const initialSelection: CellSelection = {
 };
 
 const contextReferences: AiContextChip[] = [{ id: 'ref_sheet1', type: 'reference', label: '@Sheet1' }];
-
-type DetectedObjectType = 'issuer' | 'bond' | 'unknown';
-
-type ImportedColumnRole = 'entity_key' | 'recognized_metric' | 'custom_metric' | 'ignored';
-
-type ImportedColumnProfile = {
-  index: number;
-  header: string;
-  role: ImportedColumnRole;
-  metricCode?: string;
-  fetchInterface?: string;
-  fieldName?: string;
-};
-
-type WorkbookSheetState = {
-  sheetId: string;
-  sheetName: string;
-  rows: string[][];
-  years: string[];
-  outputConfigs: Record<string, OutputCellConfig>;
-  metricDrafts: Record<string, string>;
-  metricBindings: MetricBinding[];
-  detectedObjectType: DetectedObjectType;
-  columnProfiles: ImportedColumnProfile[];
-};
-
-type ImportDraftSheet = WorkbookSheetState & {
-  previewRows: string[][];
-  customMetricCount: number;
-};
-
-type ImportDraft = {
-  fileName: string;
-  sheets: ImportDraftSheet[];
-  activeSheetId: string;
-};
 
 type ProductModule = {
   id: string;
@@ -185,18 +147,6 @@ const productModules: ProductModule[] = [
   },
 ];
 
-const initialWorkbookSheet: WorkbookSheetState = {
-  sheetId: workbook.activeSheetId,
-  sheetName: workbook.activeSheetName,
-  rows: baseRows,
-  years: baseRows[0].slice(1, 8),
-  outputConfigs: buildInitialOutputConfigs(baseRows[0].slice(1, 8), initialMetricBindings),
-  metricDrafts: {},
-  metricBindings: initialMetricBindings,
-  detectedObjectType: 'unknown',
-  columnProfiles: [],
-};
-
 function App() {
   const [gridRows, setGridRows] = useState(baseRows);
   const [years, setYears] = useState(baseRows[0].slice(1, 8));
@@ -228,26 +178,17 @@ function App() {
   const [templateSearch, setTemplateSearch] = useState('');
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [templatePickerSearch, setTemplatePickerSearch] = useState('');
-  const [workbookSheets, setWorkbookSheets] = useState<WorkbookSheetState[]>([initialWorkbookSheet]);
-  const [activeSheetId, setActiveSheetId] = useState(workbook.activeSheetId);
-  const [workbookFileName, setWorkbookFileName] = useState(workbook.workbookName);
-  const [importDialogOpen, setImportDialogOpen] = useState(false);
-  const [importDraft, setImportDraft] = useState<ImportDraft | null>(null);
-  const [importError, setImportError] = useState('');
 
   const displayRows = useMemo(() => {
-    const activeSheetForRows = workbookSheets.find((item) => item.sheetId === activeSheetId);
     const rows = gridRows.map((row) => [...row]);
-    if (!activeSheetForRows?.columnProfiles.length) {
-      rows[0] = ['指标', ...years];
-    }
+    rows[0] = ['指标', ...years];
     Object.values(outputConfigs).forEach((config) => {
       const { row, column } = parseCell(config.targetCell);
       rows[row - 1] = [...(rows[row - 1] ?? [])];
       rows[row - 1][column - 1] = renderOutputValue(config);
     });
     return rows;
-  }, [activeSheetId, gridRows, outputConfigs, workbookSheets, years]);
+  }, [gridRows, outputConfigs, years]);
 
   const selectedChip = useMemo<AiContextChip>(
     () => ({
@@ -282,36 +223,10 @@ function App() {
 
   const pickerTemplates = useMemo(() => filterTemplates(defaultTemplates, templatePickerSearch), [templatePickerSearch]);
 
-  const activeWorkbookSheet = useMemo(
-    () => workbookSheets.find((item) => item.sheetId === activeSheetId) ?? workbookSheets[0],
-    [activeSheetId, workbookSheets],
-  );
-
-  const currentWorkbook = useMemo(
-    () => ({
-      ...workbook,
-      workbookName: workbookFileName,
-      activeSheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
-      activeSheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
-    }),
-    [activeWorkbookSheet, workbookFileName],
-  );
-
-  const currentSheet = useMemo(
-    () => ({
-      ...sheet,
-      sheetId: activeWorkbookSheet?.sheetId ?? sheet.sheetId,
-      sheetName: activeWorkbookSheet?.sheetName ?? sheet.sheetName,
-      rowCount: Math.max(55, activeWorkbookSheet?.rows.length ?? sheet.rowCount),
-      columnCount: columns.length,
-    }),
-    [activeWorkbookSheet],
-  );
-
   const handleSelect = (address: string) => {
     setSelection({
-      sheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
-      sheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
+      sheetId: workbook.activeSheetId,
+      sheetName: workbook.activeSheetName,
       address,
       activeCell: address.split(':')[0],
     });
@@ -413,7 +328,7 @@ function App() {
   };
 
   const submitRequest = (query: string, source: 'chat' | 'context-menu', selected = selection) => {
-    const request = buildAiRequest(query, selected, currentWorkbook, currentSheet);
+    const request = buildAiRequest(query, selected);
     setMessages((current) => [...current, { id: `user_${Date.now()}`, role: 'user', text: query, request }]);
 
     const candidates = findMetricCandidates(query);
@@ -463,8 +378,8 @@ function App() {
     bindMetricToRow(row, metric);
     setConfirmationCard({ ...confirmationCard, status: 'confirmed' });
     setSelection({
-      sheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
-      sheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
+      sheetId: workbook.activeSheetId,
+      sheetName: workbook.activeSheetName,
       address: confirmationCard.targetCell,
       activeCell: confirmationCard.targetCell,
     });
@@ -541,8 +456,8 @@ function App() {
       x: event.clientX,
       y: event.clientY,
       selection: {
-        sheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
-        sheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
+        sheetId: workbook.activeSheetId,
+        sheetName: workbook.activeSheetName,
         address,
         activeCell: address.split(':')[0],
       },
@@ -556,168 +471,39 @@ function App() {
     setMenu(null);
   };
 
-  const saveActiveSheetSnapshot = () => {
-    setWorkbookSheets((current) =>
-      current.map((item) =>
-        item.sheetId === activeSheetId
-          ? { ...item, rows: gridRows, years, outputConfigs, metricDrafts, metricBindings }
-          : item,
-      ),
-    );
-  };
-
-  const switchSheet = (sheetId: string) => {
-    if (sheetId === activeSheetId) return;
-    saveActiveSheetSnapshot();
-    const target = workbookSheets.find((item) => item.sheetId === sheetId);
-    if (!target) return;
-    setActiveSheetId(target.sheetId);
-    setGridRows(target.rows);
-    setYears(target.years);
-    setOutputConfigs(target.outputConfigs);
-    setMetricDrafts(target.metricDrafts);
-    setMetricBindings(target.metricBindings);
-    setSelection({
-      sheetId: target.sheetId,
-      sheetName: target.sheetName,
-      address: 'A1',
-      activeCell: 'A1',
-    });
-    setActiveSuggestionCell(null);
-  };
-
-  const openImportDialog = () => {
-    setImportError('');
-    setImportDraft(null);
-    setImportDialogOpen(true);
-  };
-
-  const handleImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setImportError('');
-    try {
-      const buffer = await file.arrayBuffer();
-      const parsedWorkbook = XLSX.read(buffer, { type: 'array', cellDates: true });
-      const sheets = parsedWorkbook.SheetNames.map((sheetName, index) => {
-        const worksheet = parsedWorkbook.Sheets[sheetName];
-        const rawRows = XLSX.utils.sheet_to_json<Array<string | number | Date | boolean | null>>(worksheet, {
-          header: 1,
-          defval: '',
-          blankrows: false,
-        });
-        return buildImportedSheetState(rawRows, sheetName, index);
-      }).filter((item) => item.rows.some((row) => row.some(Boolean)));
-
-      if (sheets.length === 0) {
-        setImportError('这个 Excel 没有识别到可导入的二维表。');
-        return;
-      }
-
-      setImportDraft({
-        fileName: file.name,
-        sheets,
-        activeSheetId: sheets[0].sheetId,
-      });
-    } catch {
-      setImportError('Excel 解析失败，请确认文件是 .xlsx 格式，且没有被加密。');
-    } finally {
-      event.target.value = '';
-    }
-  };
-
-  const updateImportSheetType = (sheetId: string, objectType: DetectedObjectType) => {
-    setImportDraft((current) => {
-      if (!current) return current;
-      const sheets = current.sheets.map((item) =>
-        item.sheetId === sheetId ? rebuildImportedSheetWithObjectType(item, objectType) : item,
-      );
-      return { ...current, sheets };
-    });
-  };
-
-  const confirmImportWorkbook = () => {
-    if (!importDraft) return;
-    const sheets = importDraft.sheets.map(({ previewRows, customMetricCount, ...sheetState }) => sheetState);
-    const firstSheet = sheets[0];
-    setWorkbookSheets(sheets);
-    setActiveSheetId(firstSheet.sheetId);
-    setWorkbookFileName(importDraft.fileName);
+  const openBlankWorkbook = () => {
+    setTemplatePickerOpen(false);
     setSelectedTemplateId(null);
-    setGridRows(firstSheet.rows);
-    setYears(firstSheet.years);
-    setOutputConfigs(firstSheet.outputConfigs);
-    setMetricDrafts(firstSheet.metricDrafts);
-    setMetricBindings(firstSheet.metricBindings);
-    setSelection({
-      sheetId: firstSheet.sheetId,
-      sheetName: firstSheet.sheetName,
-      address: 'A1',
-      activeCell: 'A1',
-    });
-    setImportDialogOpen(false);
+    setGridRows(baseRows);
+    const initialYears = baseRows[0].slice(1, 8);
+    setYears(initialYears);
+    setMetricBindings(initialMetricBindings);
+    setOutputConfigs(buildInitialOutputConfigs(initialYears, initialMetricBindings));
+    setMetricDrafts({});
+    setSelection(initialSelection);
     setViewMode('workbook');
-    setFormulaPanelMode('audit');
     setMessages((current) => [
       ...current,
       {
-        id: `assistant_import_${Date.now()}`,
+        id: `assistant_blank_${Date.now()}`,
         role: 'assistant',
-        text: `已导入 ${importDraft.fileName}，保留了 ${sheets.length} 个 Sheet。蓝色字段已识别为可取数指标，红色字段是自定义或暂未识别字段，不会被刷新覆盖。`,
+        text: '已进入新建空白表。你也可以回到模板库，从债券取数模板开始，减少从空白表猜字段的成本。',
       },
     ]);
   };
 
-  const updateImportedHeader = (columnIndex: number, value: string) => {
-    if (!activeWorkbookSheet || activeWorkbookSheet.columnProfiles.length === 0) return;
-    const nextRows = gridRows.map((row) => [...row]);
-    nextRows[0] = [...(nextRows[0] ?? [])];
-    nextRows[0][columnIndex] = value;
-    const rebuilt = buildImportedSheetState(
-      nextRows,
-      activeWorkbookSheet.sheetName,
-      Number(activeWorkbookSheet.sheetId.replace(/\D/g, '')) || 0,
-      activeWorkbookSheet.detectedObjectType,
-    );
-    const nextSheet: WorkbookSheetState = {
-      ...rebuilt,
-      sheetId: activeWorkbookSheet.sheetId,
-      sheetName: activeWorkbookSheet.sheetName,
-    };
-    setGridRows(nextSheet.rows);
-    setYears(nextSheet.years);
-    setOutputConfigs(nextSheet.outputConfigs);
-    setMetricDrafts(nextSheet.metricDrafts);
-    setMetricBindings(nextSheet.metricBindings);
-    setWorkbookSheets((current) => current.map((item) => (item.sheetId === activeSheetId ? nextSheet : item)));
-  };
-
   const applyTemplate = (template: TemplateConfig) => {
     const workbookState = buildTemplateWorkbook(template);
-    const nextSheet: WorkbookSheetState = {
-      sheetId: `sheet_${template.templateId}`,
-      sheetName: 'Sheet1',
-      rows: workbookState.rows,
-      years: workbookState.headers,
-      outputConfigs: workbookState.outputConfigs,
-      metricDrafts: workbookState.metricDrafts,
-      metricBindings: [],
-      detectedObjectType: template.applicableObject === 'issuer' ? 'issuer' : 'bond',
-      columnProfiles: [],
-    };
     setTemplatePickerOpen(false);
     setSelectedTemplateId(template.templateId);
-    setWorkbookSheets([nextSheet]);
-    setActiveSheetId(nextSheet.sheetId);
-    setWorkbookFileName(`${template.templateName}.xlsx`);
     setGridRows(workbookState.rows);
     setYears(workbookState.headers);
     setMetricBindings([]);
     setOutputConfigs(workbookState.outputConfigs);
     setMetricDrafts(workbookState.metricDrafts);
     setSelection({
-      sheetId: nextSheet.sheetId,
-      sheetName: nextSheet.sheetName,
+      sheetId: workbook.activeSheetId,
+      sheetName: workbook.activeSheetName,
       address: 'A2',
       activeCell: 'A2',
     });
@@ -760,7 +546,7 @@ function App() {
             search={templateSearch}
             onSearchChange={setTemplateSearch}
             onOpenTemplate={applyTemplate}
-            onOpenImport={openImportDialog}
+            onOpenBlank={openBlankWorkbook}
           />
         </div>
       ) : (
@@ -776,17 +562,12 @@ function App() {
           />
           {activeModule.id === 'data-assistant' ? (
             <main className="excel-pane">
-              <WorkbookHeader
-                selectedTemplate={selectedTemplate}
-                workbookFileName={workbookFileName}
-                onBackToTemplates={() => setViewMode('templateHome')}
-              />
+              <WorkbookHeader selectedTemplate={selectedTemplate} onBackToTemplates={() => setViewMode('templateHome')} />
               <Ribbon
                 onRefresh={refreshOutputs}
                 onSaveTemplate={requestSaveTemplate}
                 onShowAudit={() => setFormulaPanelMode('audit')}
                 onExportTable={() => setFormulaPanelMode('export')}
-                onOpenImport={openImportDialog}
               />
               <FormulaBar activeCell={selection.activeCell} value={selectedFormulaValue} />
               <SpreadsheetGrid
@@ -794,7 +575,6 @@ function App() {
                 selection={selection}
                 years={years}
                 outputConfigs={outputConfigs}
-                columnProfiles={activeWorkbookSheet?.columnProfiles ?? []}
                 activeSuggestionCell={activeSuggestionCell}
                 enableMetricSuggestions={!selectedTemplate}
                 metricDrafts={metricDrafts}
@@ -802,15 +582,9 @@ function App() {
                 onYearChange={updateYear}
                 onMetricDraftChange={(cell, value) => setMetricDrafts((current) => ({ ...current, [cell]: value }))}
                 onBindMetric={bindMetricToRow}
-                onHeaderChange={updateImportedHeader}
                 onContextMenu={openContextMenu}
               />
-              <SheetFooter
-                selectedRange={selection.address}
-                sheets={workbookSheets}
-                activeSheetId={activeSheetId}
-                onSwitchSheet={switchSheet}
-              />
+              <SheetFooter selectedRange={selection.address} />
             </main>
           ) : (
             <ModuleWorkspace module={activeModule} />
@@ -853,17 +627,8 @@ function App() {
           search={templatePickerSearch}
           onSearchChange={setTemplatePickerSearch}
           onOpenTemplate={applyTemplate}
+          onOpenBlank={openBlankWorkbook}
           onClose={() => setTemplatePickerOpen(false)}
-        />
-      )}
-      {importDialogOpen && (
-        <ImportWorkbookModal
-          draft={importDraft}
-          error={importError}
-          onFileChange={handleImportFile}
-          onClose={() => setImportDialogOpen(false)}
-          onConfirm={confirmImportWorkbook}
-          onSheetTypeChange={updateImportSheetType}
         />
       )}
     </div>
@@ -1023,16 +788,16 @@ function TemplateHome({
   search,
   onSearchChange,
   onOpenTemplate,
-  onOpenImport,
+  onOpenBlank,
 }: {
   templates: TemplateConfig[];
   search: string;
   onSearchChange: (value: string) => void;
   onOpenTemplate: (template: TemplateConfig) => void;
-  onOpenImport: () => void;
+  onOpenBlank: () => void;
 }) {
-  const issuerTemplates = templates.filter((template) => template.applicableObject === 'issuer');
-  const bondTemplates = templates.filter((template) => template.applicableObject !== 'issuer');
+  const recommended = templates.slice(0, 7);
+  const latest = templates.slice().reverse().slice(0, 4);
 
   return (
     <main className="template-home">
@@ -1048,59 +813,32 @@ function TemplateHome({
         </label>
       </section>
       <section className="template-home-content">
-        <section className="template-import-entry">
-          <button className="import-entry-card" type="button" onClick={onOpenImport}>
-            <span className="import-entry-icon">
-              <UploadCloud size={30} />
-            </span>
-            <div>
-              <strong>导入 Excel</strong>
-              <p>上传客户已有工作簿，保留多个 Sheet，自动识别主体/债券列和可取数字段。</p>
-            </div>
-            <small>未识别指标会标红保留，不参与刷新覆盖</small>
-          </button>
-        </section>
-        <TemplateGroup title="主体模板" subtitle="按主体名称、报告期和授信指标取数" templates={issuerTemplates} onOpenTemplate={onOpenTemplate} />
-        <TemplateGroup title="债券模板" subtitle="按债券代码、估值日和发行区间取数" templates={bondTemplates} onOpenTemplate={onOpenTemplate} />
-      </section>
-    </main>
-  );
-}
-
-function TemplateGroup({
-  title,
-  subtitle,
-  templates,
-  onOpenTemplate,
-}: {
-  title: string;
-  subtitle: string;
-  templates: TemplateConfig[];
-  onOpenTemplate: (template: TemplateConfig) => void;
-}) {
-  if (templates.length === 0) {
-    return (
-      <section className="template-group">
         <div className="template-section-title">
-          <h1>{title}</h1>
-          <span>没有匹配模板</span>
+          <h1>为你推荐</h1>
+          <span>债券取数模板</span>
+        </div>
+        <div className="template-card-grid">
+          <button className="template-blank-card" type="button" onClick={onOpenBlank}>
+            <Plus size={58} />
+            <strong>新建空白表</strong>
+            <span>从空白表开始，适合临时探索</span>
+          </button>
+          {recommended.map((template) => (
+            <TemplateLibraryCard template={template} key={template.templateId} onOpen={() => onOpenTemplate(template)} />
+          ))}
+        </div>
+        <div className="template-section-title latest">
+          <h2>最新</h2>
+          <span>最近更新模板</span>
+          <button type="button">查看更多</button>
+        </div>
+        <div className="template-card-grid compact">
+          {latest.map((template) => (
+            <TemplateLibraryCard template={template} key={`latest-${template.templateId}`} onOpen={() => onOpenTemplate(template)} />
+          ))}
         </div>
       </section>
-    );
-  }
-
-  return (
-    <section className="template-group">
-      <div className="template-section-title">
-        <h1>{title}</h1>
-        <span>{subtitle}</span>
-      </div>
-      <div className="template-card-grid">
-        {templates.map((template) => (
-          <TemplateLibraryCard template={template} key={template.templateId} onOpen={() => onOpenTemplate(template)} />
-        ))}
-      </div>
-    </section>
+    </main>
   );
 }
 
@@ -1137,17 +875,16 @@ function TemplatePickerModal({
   search,
   onSearchChange,
   onOpenTemplate,
+  onOpenBlank,
   onClose,
 }: {
   templates: TemplateConfig[];
   search: string;
   onSearchChange: (value: string) => void;
   onOpenTemplate: (template: TemplateConfig) => void;
+  onOpenBlank: () => void;
   onClose: () => void;
 }) {
-  const issuerTemplates = templates.filter((template) => template.applicableObject === 'issuer');
-  const bondTemplates = templates.filter((template) => template.applicableObject !== 'issuer');
-
   return (
     <div className="modal-backdrop template-picker-backdrop" onClick={onClose}>
       <section className="template-picker-modal" onClick={(event) => event.stopPropagation()}>
@@ -1166,100 +903,24 @@ function TemplatePickerModal({
           </button>
         </div>
         <div className="template-picker-content">
-          <TemplateGroup title="主体模板" subtitle="按主体名称、报告期和授信指标取数" templates={issuerTemplates} onOpenTemplate={onOpenTemplate} />
-          <TemplateGroup title="债券模板" subtitle="按债券代码、估值日和发行区间取数" templates={bondTemplates} onOpenTemplate={onOpenTemplate} />
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ImportWorkbookModal({
-  draft,
-  error,
-  onFileChange,
-  onClose,
-  onConfirm,
-  onSheetTypeChange,
-}: {
-  draft: ImportDraft | null;
-  error: string;
-  onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  onClose: () => void;
-  onConfirm: () => void;
-  onSheetTypeChange: (sheetId: string, objectType: DetectedObjectType) => void;
-}) {
-  return (
-    <div className="modal-backdrop import-backdrop" onClick={onClose}>
-      <section className="import-modal" onClick={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <div>
-            <UploadCloud size={20} />
-            <strong>导入 Excel</strong>
+          <div className="template-section-title">
+            <h1>为你推荐</h1>
+            <span>债券取数模板</span>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭导入">
-            <X size={16} />
-          </button>
-        </div>
-        <div className="import-body">
-          <label className="excel-upload-zone">
-            <UploadCloud size={34} />
-            <strong>上传 .xlsx 工作簿</strong>
-            <span>系统会保留多个 Sheet，并逐表识别主体/债券字段和指标列。</span>
-            <input type="file" accept=".xlsx" onChange={onFileChange} />
-          </label>
-          {error && <div className="import-error">{error}</div>}
-          {draft && (
-            <div className="import-preview">
-              <div className="import-summary">
-                <strong>{draft.fileName}</strong>
-                <span>{draft.sheets.length} 个 Sheet</span>
-              </div>
-              <div className="import-sheet-list">
-                {draft.sheets.map((sheetItem) => (
-                  <article className="import-sheet-card" key={sheetItem.sheetId}>
-                    <div className="import-sheet-head">
-                      <div>
-                        <strong>{sheetItem.sheetName}</strong>
-                        <span>
-                          {objectTypeLabel(sheetItem.detectedObjectType)} · {sheetItem.customMetricCount} 个未识别指标
-                        </span>
-                      </div>
-                      <select
-                        value={sheetItem.detectedObjectType}
-                        onChange={(event) => onSheetTypeChange(sheetItem.sheetId, event.target.value as DetectedObjectType)}
-                        aria-label={`${sheetItem.sheetName} 对象类型`}
-                      >
-                        <option value="bond">债券表</option>
-                        <option value="issuer">主体表</option>
-                        <option value="unknown">待确认</option>
-                      </select>
-                    </div>
-                    <div className="import-preview-table">
-                      {sheetItem.previewRows.map((row, rowIndex) => (
-                        <div className="import-preview-row" key={`${sheetItem.sheetId}-${rowIndex}`}>
-                          {row.slice(0, 6).map((cell, cellIndex) => (
-                            <span
-                              className={sheetItem.columnProfiles[cellIndex]?.role === 'custom_metric' ? 'preview-custom' : ''}
-                              key={`${sheetItem.sheetId}-${rowIndex}-${cellIndex}`}
-                            >
-                              {cell}
-                            </span>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-        <div className="import-actions">
-          <button type="button" onClick={onClose}>取消</button>
-          <button className="primary" type="button" disabled={!draft} onClick={onConfirm}>
-            导入工作台
-          </button>
+          <div className="template-card-grid picker">
+            <button className="template-blank-card" type="button" onClick={onOpenBlank}>
+              <Plus size={58} />
+              <strong>新建空白表</strong>
+              <span>从空白表开始，适合临时探索</span>
+            </button>
+            {templates.map((template) => (
+              <TemplateLibraryCard
+                template={template}
+                key={`picker-${template.templateId}`}
+                onOpen={() => onOpenTemplate(template)}
+              />
+            ))}
+          </div>
         </div>
       </section>
     </div>
@@ -1268,11 +929,9 @@ function ImportWorkbookModal({
 
 function WorkbookHeader({
   selectedTemplate,
-  workbookFileName,
   onBackToTemplates,
 }: {
   selectedTemplate: TemplateConfig | null;
-  workbookFileName: string;
   onBackToTemplates: () => void;
 }) {
   return (
@@ -1280,7 +939,7 @@ function WorkbookHeader({
       <div className="tabs">
         <div className="file-tab active">
           <FileSpreadsheet size={14} />
-          {selectedTemplate ? `${selectedTemplate.templateName}.xlsx` : workbookFileName}
+          {selectedTemplate ? `${selectedTemplate.templateName}.xlsx` : '海底捞利润表_2021-2025.xlsx'}
           <X size={13} />
         </div>
         <div className="file-tab">
@@ -1290,7 +949,7 @@ function WorkbookHeader({
         <button className="tab-plus">+</button>
       </div>
       <div className="pathline">
-        tree &gt; 模板库 &gt; {selectedTemplate?.templateName ?? '工作表'}
+        tree &gt; 模板库 &gt; {selectedTemplate?.templateName ?? '新建空白表'}
         <span>最近修改: 05月07 15:46</span>
         <button type="button" onClick={onBackToTemplates}>返回模板库</button>
       </div>
@@ -1303,13 +962,11 @@ function Ribbon({
   onSaveTemplate,
   onShowAudit,
   onExportTable,
-  onOpenImport,
 }: {
   onRefresh: () => void;
   onSaveTemplate: () => void;
   onShowAudit: () => void;
   onExportTable: () => void;
-  onOpenImport: () => void;
 }) {
   return (
     <section className="ribbon">
@@ -1349,10 +1006,6 @@ function Ribbon({
           <FileSpreadsheet size={15} />
           导出表格
         </button>
-        <button onClick={onOpenImport}>
-          <UploadCloud size={15} />
-          导入 Excel
-        </button>
       </div>
     </section>
   );
@@ -1377,7 +1030,6 @@ function SpreadsheetGrid({
   selection,
   years,
   outputConfigs,
-  columnProfiles,
   activeSuggestionCell,
   enableMetricSuggestions,
   metricDrafts,
@@ -1385,14 +1037,12 @@ function SpreadsheetGrid({
   onYearChange,
   onMetricDraftChange,
   onBindMetric,
-  onHeaderChange,
   onContextMenu,
 }: {
   rows: string[][];
   selection: CellSelection;
   years: string[];
   outputConfigs: Record<string, OutputCellConfig>;
-  columnProfiles: ImportedColumnProfile[];
   activeSuggestionCell: string | null;
   enableMetricSuggestions: boolean;
   metricDrafts: Record<string, string>;
@@ -1400,7 +1050,6 @@ function SpreadsheetGrid({
   onYearChange: (columnIndex: number, value: string) => void;
   onMetricDraftChange: (cell: string, value: string) => void;
   onBindMetric: (row: number, metric: MetricDefinition) => void;
-  onHeaderChange: (columnIndex: number, value: string) => void;
   onContextMenu: (event: MouseEvent, address?: string) => void;
 }) {
   const rowCount = 55;
@@ -1435,21 +1084,12 @@ function SpreadsheetGrid({
                   const isYearInput = rowNumber === 1 && columnIndex >= 1 && columnIndex < 8;
                   const outputConfig = outputConfigs[address];
                   const isOutput = Boolean(outputConfig);
-                  const columnProfile = columnProfiles.find((profile) => profile.index === columnIndex);
-                  const isImportedHeader = rowNumber === 1 && Boolean(columnProfile);
-                  const isCustomMetric = isImportedHeader && columnProfile?.role === 'custom_metric';
-                  const isRecognizedMetric = isImportedHeader && columnProfile?.role === 'recognized_metric';
-                  const isEntityKey = isImportedHeader && columnProfile?.role === 'entity_key';
 
                   return (
                     <td
                       className={[
                         selected ? 'selected-cell' : '',
                         isHeader ? 'table-header-cell' : '',
-                        isImportedHeader ? 'imported-header-cell' : '',
-                        isCustomMetric ? 'custom-metric-header' : '',
-                        isRecognizedMetric ? 'recognized-metric-header' : '',
-                        isEntityKey ? 'entity-key-header' : '',
                         isMetricInput || isYearInput ? 'input-cell' : '',
                         isYearInput ? 'year-input-cell' : '',
                         isOutput ? `output-cell status-${outputConfig.status}` : '',
@@ -1465,14 +1105,7 @@ function SpreadsheetGrid({
                         onContextMenu(event, selected ? selection.address : address);
                       }}
                     >
-                      {isImportedHeader && (isCustomMetric || isRecognizedMetric) ? (
-                        <input
-                          className="metric-input imported-header-input"
-                          value={value}
-                          onChange={(event) => onHeaderChange(columnIndex, event.target.value)}
-                          aria-label={`${address} 导入指标列名`}
-                        />
-                      ) : isYearInput ? (
+                      {isYearInput ? (
                         <input
                           value={years[columnIndex - 1] ?? ''}
                           onChange={(event) => onYearChange(columnIndex + 1, event.target.value)}
@@ -1904,56 +1537,30 @@ function ContextMenu({ x, y, onRun }: { x: number; y: number; onRun: (label: str
   );
 }
 
-function SheetFooter({
-  selectedRange,
-  sheets,
-  activeSheetId,
-  onSwitchSheet,
-}: {
-  selectedRange: string;
-  sheets: WorkbookSheetState[];
-  activeSheetId: string;
-  onSwitchSheet: (sheetId: string) => void;
-}) {
-  const activeSheet = sheets.find((item) => item.sheetId === activeSheetId) ?? sheets[0];
-  const customCount = activeSheet?.columnProfiles.filter((item) => item.role === 'custom_metric').length ?? 0;
+function SheetFooter({ selectedRange }: { selectedRange: string }) {
   return (
     <footer className="sheet-footer">
       <div className="sheet-tabs">
         <button className="sheet-nav">‹</button>
         <button className="sheet-nav">›</button>
-        {sheets.map((item) => (
-          <button
-            className={`sheet-tab ${item.sheetId === activeSheetId ? 'active' : ''}`}
-            key={item.sheetId}
-            onClick={() => onSwitchSheet(item.sheetId)}
-          >
-            {item.sheetName}
-          </button>
-        ))}
+        <button className="sheet-tab active">Sheet1</button>
         <button className="sheet-plus">+</button>
       </div>
       <div className="status">
         <span>就绪</span>
         <span>选区: {selectedRange}</span>
-        <span>{activeSheet ? objectTypeLabel(activeSheet.detectedObjectType) : '工作表'}</span>
-        {customCount > 0 && <span>{customCount} 个自定义指标</span>}
+        <span>输入区 A2:A13</span>
         <span>100%</span>
       </div>
     </footer>
   );
 }
 
-function buildAiRequest(
-  query: string,
-  selection: CellSelection,
-  activeWorkbook = workbook,
-  activeSheet = sheet,
-): AiRequest {
+function buildAiRequest(query: string, selection: CellSelection): AiRequest {
   return {
     query,
-    workbook: activeWorkbook,
-    sheet: activeSheet,
+    workbook,
+    sheet,
     selectedRange: selection,
     referencedContexts: query.includes('@Sheet1') ? contextReferences : [],
   };
@@ -1982,185 +1589,6 @@ function objectScopeText(scope: TemplateConfig['applicableObject']) {
     bond: '债券',
     bond_set: '债券集合',
   }[scope];
-}
-
-function objectTypeLabel(type: DetectedObjectType) {
-  return {
-    issuer: '主体表',
-    bond: '债券表',
-    unknown: '待确认',
-  }[type];
-}
-
-function normalizeHeader(value: string) {
-  return value.replace(/\s+/g, '').replace(/[()（）_\-—/\\]/g, '').toLowerCase();
-}
-
-function stringifyCell(value: string | number | Date | boolean | null | undefined) {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  if (value === null || value === undefined) return '';
-  return String(value).trim();
-}
-
-function detectObjectType(rows: string[][], headerRowIndex: number): DetectedObjectType {
-  const sample = rows.slice(headerRowIndex, headerRowIndex + 8).flat().join(' ');
-  const normalizedSample = normalizeHeader(sample);
-  const hasBondHeader = ['债券代码', '证券代码', '债券简称', '债券全称'].some((keyword) =>
-    normalizedSample.includes(normalizeHeader(keyword)),
-  );
-  const hasBondCodeValue = /\b\d{6,9}\.(IB|SH|SZ|BJ|银行间)\b/i.test(sample);
-  if (hasBondHeader || hasBondCodeValue) return 'bond';
-
-  const hasIssuerHeader = ['主体名称', '发行人', '公司名称', '企业名称'].some((keyword) =>
-    normalizedSample.includes(normalizeHeader(keyword)),
-  );
-  return hasIssuerHeader ? 'issuer' : 'unknown';
-}
-
-function findHeaderRow(rows: string[][]) {
-  const keyWords = ['债券代码', '证券代码', '债券简称', '主体名称', '发行人', '公司名称', '估值日期', '报告期'];
-  let bestIndex = rows.findIndex((row) => row.some(Boolean));
-  let bestScore = -1;
-
-  rows.slice(0, 8).forEach((row, index) => {
-    const text = normalizeHeader(row.join(' '));
-    const nonEmptyCount = row.filter(Boolean).length;
-    const keywordScore = keyWords.filter((keyword) => text.includes(normalizeHeader(keyword))).length * 4;
-    const score = keywordScore + Math.min(nonEmptyCount, 8);
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = index;
-    }
-  });
-
-  return Math.max(bestIndex, 0);
-}
-
-function buildMetricDictionary(objectType: DetectedObjectType) {
-  return defaultTemplates
-    .filter((template) => {
-      if (objectType === 'issuer') return template.applicableObject === 'issuer';
-      if (objectType === 'bond') return template.applicableObject !== 'issuer';
-      return true;
-    })
-    .flatMap((template) =>
-      template.defaultOutputFields.map((fieldName) => ({
-        normalized: normalizeHeader(fieldName),
-        fieldName,
-        metricCode: `${template.hiddenFetchConfig.interfaceName}.${template.hiddenFetchConfig.fieldMapping[fieldName] ?? fieldName}`,
-        fetchInterface: template.hiddenFetchConfig.interfaceName,
-      })),
-    );
-}
-
-function classifyImportedColumn(
-  header: string,
-  index: number,
-  objectType: DetectedObjectType,
-): ImportedColumnProfile {
-  const normalized = normalizeHeader(header);
-  if (!normalized) return { index, header, role: 'ignored' };
-
-  const bondKeys = ['债券代码', '证券代码', '债券简称', '债券全称', 'isin代码', '发行人名称'];
-  const issuerKeys = ['主体名称', '发行人', '公司名称', '企业名称'];
-  const entityKeys = objectType === 'bond' ? bondKeys : objectType === 'issuer' ? issuerKeys : [...bondKeys, ...issuerKeys];
-  if (entityKeys.some((keyword) => normalized.includes(normalizeHeader(keyword)))) {
-    return { index, header, role: 'entity_key' };
-  }
-
-  const match = buildMetricDictionary(objectType).find((item) => item.normalized === normalized);
-  if (match) {
-    return {
-      index,
-      header,
-      role: 'recognized_metric',
-      metricCode: match.metricCode,
-      fetchInterface: match.fetchInterface,
-      fieldName: match.fieldName,
-    };
-  }
-
-  return { index, header, role: 'custom_metric' };
-}
-
-function padImportedRows(rows: string[][]) {
-  const normalizedRows = rows.map((row) => columns.map((_, index) => row[index] ?? ''));
-  while (normalizedRows.length < 55) {
-    normalizedRows.push(Array.from({ length: columns.length }, () => ''));
-  }
-  return normalizedRows;
-}
-
-function buildImportedSheetState(
-  rawRows: Array<Array<string | number | Date | boolean | null | undefined>>,
-  sheetName: string,
-  index: number,
-  objectTypeOverride?: DetectedObjectType,
-): ImportDraftSheet {
-  const cleanedRows = rawRows
-    .map((row) => row.map(stringifyCell))
-    .filter((row) => row.some(Boolean));
-  const headerRowIndex = findHeaderRow(cleanedRows);
-  const objectType = objectTypeOverride ?? detectObjectType(cleanedRows, headerRowIndex);
-  const rows = padImportedRows(cleanedRows.slice(headerRowIndex));
-  const header = rows[0] ?? [];
-  const columnProfiles = header.map((cell, columnIndex) => classifyImportedColumn(cell, columnIndex, objectType));
-  const entityColumn = columnProfiles.find((profile) => profile.role === 'entity_key')?.index ?? 0;
-  const outputConfigs: Record<string, OutputCellConfig> = {};
-  const metricBindings: MetricBinding[] = [];
-
-  columnProfiles.forEach((profile) => {
-    if (profile.role !== 'recognized_metric' || !profile.metricCode) return;
-    const metricCode = profile.metricCode;
-    const metricColumn = columns[profile.index] ?? 'A';
-    metricBindings.push({
-      row: 1,
-      cell: `${metricColumn}1`,
-      displayName: profile.header,
-      metricCode,
-      source: profile.fetchInterface ?? 'DM_DATA',
-      disambiguationStatus: 'confirmed',
-    });
-    rows.slice(1).forEach((row, rowIndex) => {
-      if (!row.some(Boolean)) return;
-      const targetCell = makeCellAddress(profile.index + 1, rowIndex + 2);
-      outputConfigs[targetCell] = {
-        targetCell,
-        metricCell: `${metricColumn}1`,
-        yearCell: `${metricColumn}1`,
-        metricCode,
-        year: profile.fieldName ?? profile.header,
-        status: 'ready',
-        value: row[profile.index] ?? '',
-        fetchInterface: profile.fetchInterface,
-        fieldName: profile.fieldName ?? profile.header,
-        parameterCell: makeCellAddress(entityColumn + 1, rowIndex + 2),
-      };
-    });
-  });
-
-  return {
-    sheetId: `import_sheet_${index + 1}`,
-    sheetName: sheetName || `Sheet${index + 1}`,
-    rows,
-    years: header.slice(1, 8),
-    outputConfigs,
-    metricDrafts: {},
-    metricBindings,
-    detectedObjectType: objectType,
-    columnProfiles,
-    previewRows: rows.slice(0, 5),
-    customMetricCount: columnProfiles.filter((profile) => profile.role === 'custom_metric').length,
-  };
-}
-
-function rebuildImportedSheetWithObjectType(sheetState: ImportDraftSheet, objectType: DetectedObjectType) {
-  const rebuilt = buildImportedSheetState(sheetState.rows, sheetState.sheetName, Number(sheetState.sheetId.replace(/\D/g, '')) || 0, objectType);
-  return {
-    ...rebuilt,
-    sheetId: sheetState.sheetId,
-    sheetName: sheetState.sheetName,
-  };
 }
 
 function filterTemplates(templates: TemplateConfig[], search: string) {
