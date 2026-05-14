@@ -1,4 +1,4 @@
-export type OutputStatus = 'empty' | 'pendingRefresh' | 'loading' | 'ready' | 'failed';
+export type OutputStatus = 'empty' | 'loading' | 'ready' | 'failed';
 
 export type MetricDefinition = {
   code: string;
@@ -9,6 +9,17 @@ export type MetricDefinition = {
   description: string;
   aliases: string[];
 };
+
+export type FieldDefinition = {
+  code: string;
+  label: string;
+  category: string;
+  unit: string;
+  description: string;
+  aliases: string[];
+};
+
+export type ColumnParamType = 'year' | 'fieldCode' | 'date';
 
 export type MetricBinding = {
   row: number;
@@ -22,9 +33,9 @@ export type MetricBinding = {
 export type OutputCellConfig = {
   targetCell: string;
   metricCell: string;
-  yearCell: string;
+  columnParamCell: string;
   metricCode: string;
-  year: string;
+  columnParam: string;
   status: OutputStatus;
   lastRefreshAt?: string;
   value?: string;
@@ -61,6 +72,7 @@ export type TemplateConfig = {
   requiredParams: TemplateParamSlot[];
   optionalParams: TemplateParamSlot[];
   defaultOutputFields: string[];
+  columnParamType?: ColumnParamType;
   hiddenFetchConfig: HiddenFetchConfig;
   previewRows: string[][];
 };

@@ -42,15 +42,18 @@ import {
   Table2,
   Tag,
   Trash2,
+  UploadCloud,
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { FormEvent, MouseEvent, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, MouseEvent, useMemo, useState } from 'react';
+import * as XLSX from 'xlsx';
 import {
   baseRows,
   buildInitialOutputConfigs,
   columns,
   defaultTemplates,
+  findFieldCandidates,
   findMetricCandidates,
   initialMetricBindings,
   makeCellAddress,
@@ -65,6 +68,8 @@ import type {
   AiRequest,
   CellSelection,
   ChatMessage,
+  ColumnParamType,
+  FieldDefinition,
   MetricBinding,
   MetricDefinition,
   OutputCellConfig,
@@ -79,6 +84,10 @@ type MenuState = {
   selection: CellSelection;
 } | null;
 
+type InputCellMode = 'system' | 'custom';
+type HeaderColumnMode = 'system' | 'custom';
+type SuggestionContext = 'metricRow' | 'headerCol';
+
 const initialSelection: CellSelection = {
   sheetId: workbook.activeSheetId,
   sheetName: workbook.activeSheetName,
@@ -87,6 +96,46 @@ const initialSelection: CellSelection = {
 };
 
 const contextReferences: AiContextChip[] = [{ id: 'ref_sheet1', type: 'reference', label: '@Sheet1' }];
+
+type DetectedObjectType = 'issuer' | 'bond' | 'unknown';
+
+type ImportedColumnRole = 'entity_key' | 'recognized_metric' | 'custom_metric' | 'ignored';
+
+type ImportedColumnProfile = {
+  index: number;
+  header: string;
+  role: ImportedColumnRole;
+  metricCode?: string;
+  fetchInterface?: string;
+  fieldName?: string;
+};
+
+type WorkbookSheetState = {
+  sheetId: string;
+  sheetName: string;
+  rows: string[][];
+  years: string[];
+  outputConfigs: Record<string, OutputCellConfig>;
+  metricDrafts: Record<string, string>;
+  metricBindings: MetricBinding[];
+  inputCellModes: Record<string, InputCellMode>;
+  headerColumnModes: Record<string, HeaderColumnMode>;
+  columnParamType: ColumnParamType;
+  activeColumnCount: number;
+  detectedObjectType: DetectedObjectType;
+  columnProfiles: ImportedColumnProfile[];
+};
+
+type ImportDraftSheet = WorkbookSheetState & {
+  previewRows: string[][];
+  customMetricCount: number;
+};
+
+type ImportDraft = {
+  fileName: string;
+  sheets: ImportDraftSheet[];
+  activeSheetId: string;
+};
 
 type ProductModule = {
   id: string;
@@ -147,6 +196,22 @@ const productModules: ProductModule[] = [
   },
 ];
 
+const initialWorkbookSheet: WorkbookSheetState = {
+  sheetId: workbook.activeSheetId,
+  sheetName: workbook.activeSheetName,
+  rows: baseRows,
+  years: baseRows[0].slice(1, 8),
+  outputConfigs: buildInitialOutputConfigs(baseRows[0].slice(1, 8), initialMetricBindings),
+  metricDrafts: {},
+  metricBindings: initialMetricBindings,
+  inputCellModes: Object.fromEntries(initialMetricBindings.map((binding) => [binding.cell, 'system' as InputCellMode])),
+  headerColumnModes: Object.fromEntries(columns.slice(1, 8).map((column) => [column, 'system' as HeaderColumnMode])),
+  columnParamType: 'year',
+  activeColumnCount: 8,
+  detectedObjectType: 'unknown',
+  columnProfiles: [],
+};
+
 function App() {
   const [gridRows, setGridRows] = useState(baseRows);
   const [years, setYears] = useState(baseRows[0].slice(1, 8));
@@ -172,23 +237,36 @@ function App() {
   const [appliedNote, setAppliedNote] = useState('');
   const [activeSuggestionCell, setActiveSuggestionCell] = useState<string | null>(null);
   const [metricDrafts, setMetricDrafts] = useState<Record<string, string>>({});
+  const [inputCellModes, setInputCellModes] = useState<Record<string, InputCellMode>>(initialWorkbookSheet.inputCellModes);
+  const [headerColumnModes, setHeaderColumnModes] = useState<Record<string, HeaderColumnMode>>(initialWorkbookSheet.headerColumnModes);
+  const [columnParamType, setColumnParamType] = useState<ColumnParamType>('year');
+  const [activeColumnCount, setActiveColumnCount] = useState(8);
   const [activeModuleId, setActiveModuleId] = useState(productModules[0].id);
   const [viewMode, setViewMode] = useState<'templateHome' | 'workbook'>('templateHome');
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateSearch, setTemplateSearch] = useState('');
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [templatePickerSearch, setTemplatePickerSearch] = useState('');
+  const [workbookSheets, setWorkbookSheets] = useState<WorkbookSheetState[]>([initialWorkbookSheet]);
+  const [activeSheetId, setActiveSheetId] = useState(workbook.activeSheetId);
+  const [workbookFileName, setWorkbookFileName] = useState(workbook.workbookName);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [importDraft, setImportDraft] = useState<ImportDraft | null>(null);
+  const [importError, setImportError] = useState('');
 
   const displayRows = useMemo(() => {
+    const activeSheetForRows = workbookSheets.find((item) => item.sheetId === activeSheetId);
     const rows = gridRows.map((row) => [...row]);
-    rows[0] = ['指标', ...years];
+    if (!activeSheetForRows?.columnProfiles.length) {
+      rows[0] = ['指标', ...years];
+    }
     Object.values(outputConfigs).forEach((config) => {
       const { row, column } = parseCell(config.targetCell);
       rows[row - 1] = [...(rows[row - 1] ?? [])];
       rows[row - 1][column - 1] = renderOutputValue(config);
     });
     return rows;
-  }, [gridRows, outputConfigs, years]);
+  }, [activeSheetId, gridRows, outputConfigs, workbookSheets, years]);
 
   const selectedChip = useMemo<AiContextChip>(
     () => ({
@@ -202,7 +280,7 @@ function App() {
   const selectedFormulaValue = useMemo(() => {
     const config = outputConfigs[selection.activeCell];
     if (config) {
-      return `隐藏取数配置: ${config.fetchInterface ?? 'DMDATA'}(${config.metricCode}; param=${config.parameterCell ?? config.metricCell}; field=${config.fieldName ?? config.yearCell})`;
+      return `隐藏取数配置: ${config.fetchInterface ?? 'DMDATA'}(${config.metricCode}; param=${config.parameterCell ?? config.metricCell}; field=${config.fieldName ?? config.columnParamCell})`;
     }
     return getCellValue(displayRows, selection.activeCell);
   }, [displayRows, outputConfigs, selection.activeCell]);
@@ -223,18 +301,68 @@ function App() {
 
   const pickerTemplates = useMemo(() => filterTemplates(defaultTemplates, templatePickerSearch), [templatePickerSearch]);
 
+  const activeWorkbookSheet = useMemo(
+    () => workbookSheets.find((item) => item.sheetId === activeSheetId) ?? workbookSheets[0],
+    [activeSheetId, workbookSheets],
+  );
+
+  const currentWorkbook = useMemo(
+    () => ({
+      ...workbook,
+      workbookName: workbookFileName,
+      activeSheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
+      activeSheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
+    }),
+    [activeWorkbookSheet, workbookFileName],
+  );
+
+  const currentSheet = useMemo(
+    () => ({
+      ...sheet,
+      sheetId: activeWorkbookSheet?.sheetId ?? sheet.sheetId,
+      sheetName: activeWorkbookSheet?.sheetName ?? sheet.sheetName,
+      rowCount: Math.max(55, activeWorkbookSheet?.rows.length ?? sheet.rowCount),
+      columnCount: columns.length,
+    }),
+    [activeWorkbookSheet],
+  );
+
   const handleSelect = (address: string) => {
     setSelection({
-      sheetId: workbook.activeSheetId,
-      sheetName: workbook.activeSheetName,
+      sheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
+      sheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
       address,
       activeCell: address.split(':')[0],
     });
-    setActiveSuggestionCell(!selectedTemplate && isMetricInputCell(address) ? address : null);
+    setActiveSuggestionCell(!selectedTemplate && getSuggestionContext(address, activeColumnCount) ? address : null);
+  };
+
+  const normalizeColumnParam = (value: string) => {
+    if (columnParamType === 'year') return value.replace(/[^\d]/g, '').slice(0, 4);
+    return value.trim();
+  };
+
+  const refreshConfiguredCells = (cellKeys: string[]) => {
+    if (cellKeys.length === 0) return;
+    const now = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    setOutputConfigs((current) => {
+      const next = { ...current };
+      cellKeys.forEach((cell) => {
+        const config = next[cell];
+        if (!config) return;
+        next[cell] = {
+          ...config,
+          status: config.metricCode && config.columnParam ? 'ready' : 'empty',
+          value: config.metricCode && config.columnParam ? mockFetchMetricValue(config.metricCode, config.columnParam) : '',
+          lastRefreshAt: config.metricCode && config.columnParam ? now : undefined,
+        };
+      });
+      return next;
+    });
   };
 
   const updateYear = (columnIndex: number, value: string) => {
-    const cleanYear = value.replace(/[^\d]/g, '').slice(0, 4);
+    const cleanYear = normalizeColumnParam(value);
     const nextYears = [...years];
     nextYears[columnIndex - 2] = cleanYear;
     setYears(nextYears);
@@ -242,11 +370,11 @@ function App() {
     setOutputConfigs((current) => {
       const next = { ...current };
       Object.values(next).forEach((config) => {
-        if (config.yearCell === `${columns[columnIndex - 1]}1`) {
-          config.year = cleanYear;
-          config.status = config.metricCode && cleanYear ? 'pendingRefresh' : 'empty';
-          config.value = '';
-          config.lastRefreshAt = undefined;
+        if (config.columnParamCell === `${columns[columnIndex - 1]}1`) {
+          config.columnParam = cleanYear;
+          config.status = config.metricCode && cleanYear ? 'ready' : 'empty';
+          config.value = config.metricCode && cleanYear ? mockFetchMetricValue(config.metricCode, cleanYear) : '';
+          config.lastRefreshAt = config.metricCode && cleanYear ? new Date().toISOString().slice(0, 16).replace('T', ' ') : undefined;
         }
       });
       return next;
@@ -277,46 +405,125 @@ function App() {
         next[targetCell] = {
           targetCell,
           metricCell: `A${row}`,
-          yearCell: `${columns[columnIndex - 1]}1`,
+          columnParamCell: `${columns[columnIndex - 1]}1`,
           metricCode: metric.code,
-          year,
-          status: year ? 'pendingRefresh' : 'empty',
-          value: '',
+          columnParam: year,
+          status: year ? 'ready' : 'empty',
+          value: year ? mockFetchMetricValue(metric.code, year) : '',
+          lastRefreshAt: year ? new Date().toISOString().slice(0, 16).replace('T', ' ') : undefined,
         };
       });
       return next;
     });
     setActiveSuggestionCell(null);
     setMetricDrafts((current) => ({ ...current, [`A${row}`]: metric.label }));
+    setInputCellModes((current) => ({ ...current, [`A${row}`]: 'system' }));
+  };
+
+  const keepCustomInput = (cell: string, value: string) => {
+    const { row } = parseCell(cell);
+    const nextRows = gridRows.map((item) => [...item]);
+    nextRows[row - 1] = [...(nextRows[row - 1] ?? [])];
+    nextRows[row - 1][0] = value;
+    setGridRows(nextRows);
+    setMetricDrafts((current) => ({ ...current, [cell]: value }));
+    setInputCellModes((current) => ({ ...current, [cell]: 'custom' }));
+    setMetricBindings((current) => current.filter((item) => item.row !== row));
+    setOutputConfigs((current) => {
+      const next = { ...current };
+      years.forEach((_, index) => {
+        delete next[makeCellAddress(index + 2, row)];
+      });
+      return next;
+    });
+    setActiveSuggestionCell(null);
+  };
+
+  const updateInputDraft = (cell: string, value: string) => {
+    const { row } = parseCell(cell);
+    const nextRows = gridRows.map((item) => [...item]);
+    nextRows[row - 1] = [...(nextRows[row - 1] ?? [])];
+    nextRows[row - 1][0] = value;
+    setGridRows(nextRows);
+    setMetricDrafts((current) => ({ ...current, [cell]: value }));
+    setInputCellModes((current) => ({ ...current, [cell]: 'custom' }));
+  };
+
+  const updateResultCell = (cell: string, value: string) => {
+    const { row, column } = parseCell(cell);
+    const nextRows = gridRows.map((item) => [...item]);
+    nextRows[row - 1] = [...(nextRows[row - 1] ?? [])];
+    nextRows[row - 1][column - 1] = value;
+    setGridRows(nextRows);
+  };
+
+  const bindFieldToColumn = (columnIndex: number, field: FieldDefinition) => {
+    const columnLetter = columns[columnIndex - 1];
+    const nextYears = [...years];
+    nextYears[columnIndex - 2] = field.code;
+    setYears(nextYears);
+    setHeaderColumnModes((current) => ({ ...current, [columnLetter]: 'system' }));
+    setOutputConfigs((current) => {
+      const next = { ...current };
+      metricBindings.forEach((binding) => {
+        const targetCell = makeCellAddress(columnIndex, binding.row);
+        next[targetCell] = {
+          targetCell,
+          metricCell: `A${binding.row}`,
+          columnParamCell: `${columnLetter}1`,
+          metricCode: binding.metricCode,
+          columnParam: field.code,
+          status: 'ready',
+          value: mockFetchMetricValue(binding.metricCode, field.code),
+          lastRefreshAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+          fieldName: field.label,
+        };
+      });
+      return next;
+    });
+    setActiveSuggestionCell(null);
+  };
+
+  const keepCustomHeader = (columnIndex: number, value: string) => {
+    const columnLetter = columns[columnIndex - 1];
+    const nextYears = [...years];
+    nextYears[columnIndex - 2] = value.trim();
+    setYears(nextYears);
+    setHeaderColumnModes((current) => ({ ...current, [columnLetter]: 'custom' }));
+    setOutputConfigs((current) => {
+      const next = { ...current };
+      Object.keys(next).forEach((cell) => {
+        if (next[cell].columnParamCell === `${columnLetter}1`) delete next[cell];
+      });
+      return next;
+    });
+    setActiveSuggestionCell(null);
+  };
+
+  const updateHeaderDraft = (columnIndex: number, value: string) => {
+    const columnLetter = columns[columnIndex - 1];
+    const nextYears = [...years];
+    nextYears[columnIndex - 2] = value;
+    setYears(nextYears);
+    setHeaderColumnModes((current) => ({ ...current, [columnLetter]: 'custom' }));
+  };
+
+  const addColumn = () => {
+    if (activeColumnCount >= columns.length) return;
+    const newActiveCount = activeColumnCount + 1;
+    const columnLetter = columns[newActiveCount - 1];
+    setActiveColumnCount(newActiveCount);
+    setYears((current) => {
+      const next = [...current];
+      next[newActiveCount - 2] = '';
+      return next;
+    });
+    setHeaderColumnModes((current) => ({ ...current, [columnLetter]: 'custom' }));
+    setActiveSuggestionCell(`${columnLetter}1`);
   };
 
   const refreshOutputs = () => {
-    const now = '2026-05-07 15:46';
-    setOutputConfigs((current) => {
-      const loading: Record<string, OutputCellConfig> = {};
-      Object.entries(current).forEach(([cell, config]) => {
-        loading[cell] = config.status === 'pendingRefresh' ? { ...config, status: 'loading' } : config;
-      });
-      setTimeout(() => {
-        setOutputConfigs((latest) => {
-          const refreshed: Record<string, OutputCellConfig> = {};
-          Object.entries(latest).forEach(([cell, config]) => {
-            if (config.status === 'loading') {
-              refreshed[cell] = {
-                ...config,
-                status: 'ready',
-                value: mockFetchMetricValue(config.metricCode, config.year),
-                lastRefreshAt: now,
-              };
-            } else {
-              refreshed[cell] = config;
-            }
-          });
-          return refreshed;
-        });
-      }, 450);
-      return loading;
-    });
+    refreshConfiguredCells(Object.keys(outputConfigs).filter((cell) => outputConfigs[cell].status === 'ready'));
     setMessages((current) => [
       ...current,
       {
@@ -328,7 +535,7 @@ function App() {
   };
 
   const submitRequest = (query: string, source: 'chat' | 'context-menu', selected = selection) => {
-    const request = buildAiRequest(query, selected);
+    const request = buildAiRequest(query, selected, currentWorkbook, currentSheet);
     setMessages((current) => [...current, { id: `user_${Date.now()}`, role: 'user', text: query, request }]);
 
     const candidates = findMetricCandidates(query);
@@ -378,8 +585,8 @@ function App() {
     bindMetricToRow(row, metric);
     setConfirmationCard({ ...confirmationCard, status: 'confirmed' });
     setSelection({
-      sheetId: workbook.activeSheetId,
-      sheetName: workbook.activeSheetName,
+      sheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
+      sheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
       address: confirmationCard.targetCell,
       activeCell: confirmationCard.targetCell,
     });
@@ -456,8 +663,8 @@ function App() {
       x: event.clientX,
       y: event.clientY,
       selection: {
-        sheetId: workbook.activeSheetId,
-        sheetName: workbook.activeSheetName,
+        sheetId: activeWorkbookSheet?.sheetId ?? workbook.activeSheetId,
+        sheetName: activeWorkbookSheet?.sheetName ?? workbook.activeSheetName,
         address,
         activeCell: address.split(':')[0],
       },
@@ -471,39 +678,199 @@ function App() {
     setMenu(null);
   };
 
-  const openBlankWorkbook = () => {
-    setTemplatePickerOpen(false);
+  const saveActiveSheetSnapshot = () => {
+    setWorkbookSheets((current) =>
+      current.map((item) =>
+        item.sheetId === activeSheetId
+          ? {
+              ...item,
+              rows: gridRows,
+              years,
+              outputConfigs,
+              metricDrafts,
+              metricBindings,
+              inputCellModes,
+              headerColumnModes,
+              columnParamType,
+              activeColumnCount,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const switchSheet = (sheetId: string) => {
+    if (sheetId === activeSheetId) return;
+    saveActiveSheetSnapshot();
+    const target = workbookSheets.find((item) => item.sheetId === sheetId);
+    if (!target) return;
+    setActiveSheetId(target.sheetId);
+    setGridRows(target.rows);
+    setYears(target.years);
+    setOutputConfigs(target.outputConfigs);
+    setMetricDrafts(target.metricDrafts);
+    setMetricBindings(target.metricBindings);
+    setInputCellModes(target.inputCellModes);
+    setHeaderColumnModes(target.headerColumnModes);
+    setColumnParamType(target.columnParamType);
+    setActiveColumnCount(target.activeColumnCount);
+    setSelection({
+      sheetId: target.sheetId,
+      sheetName: target.sheetName,
+      address: 'A1',
+      activeCell: 'A1',
+    });
+    setActiveSuggestionCell(null);
+  };
+
+  const openImportDialog = () => {
+    setImportError('');
+    setImportDraft(null);
+    setImportDialogOpen(true);
+  };
+
+  const handleImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImportError('');
+    try {
+      const buffer = await file.arrayBuffer();
+      const parsedWorkbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+      const sheets = parsedWorkbook.SheetNames.map((sheetName, index) => {
+        const worksheet = parsedWorkbook.Sheets[sheetName];
+        const rawRows = XLSX.utils.sheet_to_json<Array<string | number | Date | boolean | null>>(worksheet, {
+          header: 1,
+          defval: '',
+          blankrows: false,
+        });
+        return buildImportedSheetState(rawRows, sheetName, index);
+      }).filter((item) => item.rows.some((row) => row.some(Boolean)));
+
+      if (sheets.length === 0) {
+        setImportError('这个 Excel 没有识别到可导入的二维表。');
+        return;
+      }
+
+      setImportDraft({
+        fileName: file.name,
+        sheets,
+        activeSheetId: sheets[0].sheetId,
+      });
+    } catch {
+      setImportError('Excel 解析失败，请确认文件是 .xlsx 格式，且没有被加密。');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const updateImportSheetType = (sheetId: string, objectType: DetectedObjectType) => {
+    setImportDraft((current) => {
+      if (!current) return current;
+      const sheets = current.sheets.map((item) =>
+        item.sheetId === sheetId ? rebuildImportedSheetWithObjectType(item, objectType) : item,
+      );
+      return { ...current, sheets };
+    });
+  };
+
+  const confirmImportWorkbook = () => {
+    if (!importDraft) return;
+    const sheets = importDraft.sheets.map(({ previewRows, customMetricCount, ...sheetState }) => sheetState);
+    const firstSheet = sheets[0];
+    setWorkbookSheets(sheets);
+    setActiveSheetId(firstSheet.sheetId);
+    setWorkbookFileName(importDraft.fileName);
     setSelectedTemplateId(null);
-    setGridRows(baseRows);
-    const initialYears = baseRows[0].slice(1, 8);
-    setYears(initialYears);
-    setMetricBindings(initialMetricBindings);
-    setOutputConfigs(buildInitialOutputConfigs(initialYears, initialMetricBindings));
-    setMetricDrafts({});
-    setSelection(initialSelection);
+    setGridRows(firstSheet.rows);
+    setYears(firstSheet.years);
+    setOutputConfigs(firstSheet.outputConfigs);
+    setMetricDrafts(firstSheet.metricDrafts);
+    setMetricBindings(firstSheet.metricBindings);
+    setInputCellModes(firstSheet.inputCellModes);
+    setHeaderColumnModes(firstSheet.headerColumnModes);
+    setColumnParamType(firstSheet.columnParamType);
+    setActiveColumnCount(firstSheet.activeColumnCount);
+    setSelection({
+      sheetId: firstSheet.sheetId,
+      sheetName: firstSheet.sheetName,
+      address: 'A1',
+      activeCell: 'A1',
+    });
+    setImportDialogOpen(false);
     setViewMode('workbook');
+    setFormulaPanelMode('audit');
     setMessages((current) => [
       ...current,
       {
-        id: `assistant_blank_${Date.now()}`,
+        id: `assistant_import_${Date.now()}`,
         role: 'assistant',
-        text: '已进入新建空白表。你也可以回到模板库，从债券取数模板开始，减少从空白表猜字段的成本。',
+        text: `已导入 ${importDraft.fileName}，保留了 ${sheets.length} 个 Sheet。蓝色字段已识别为可取数指标，红色字段是自定义或暂未识别字段，不会被刷新覆盖。`,
       },
     ]);
   };
 
+  const updateImportedHeader = (columnIndex: number, value: string) => {
+    if (!activeWorkbookSheet || activeWorkbookSheet.columnProfiles.length === 0) return;
+    const nextRows = gridRows.map((row) => [...row]);
+    nextRows[0] = [...(nextRows[0] ?? [])];
+    nextRows[0][columnIndex] = value;
+    const rebuilt = buildImportedSheetState(
+      nextRows,
+      activeWorkbookSheet.sheetName,
+      Number(activeWorkbookSheet.sheetId.replace(/\D/g, '')) || 0,
+      activeWorkbookSheet.detectedObjectType,
+    );
+    const nextSheet: WorkbookSheetState = {
+      ...rebuilt,
+      sheetId: activeWorkbookSheet.sheetId,
+      sheetName: activeWorkbookSheet.sheetName,
+    };
+    setGridRows(nextSheet.rows);
+    setYears(nextSheet.years);
+    setOutputConfigs(nextSheet.outputConfigs);
+    setMetricDrafts(nextSheet.metricDrafts);
+    setMetricBindings(nextSheet.metricBindings);
+    setInputCellModes(nextSheet.inputCellModes);
+    setHeaderColumnModes(nextSheet.headerColumnModes);
+    setColumnParamType(nextSheet.columnParamType);
+    setActiveColumnCount(nextSheet.activeColumnCount);
+    setWorkbookSheets((current) => current.map((item) => (item.sheetId === activeSheetId ? nextSheet : item)));
+  };
+
   const applyTemplate = (template: TemplateConfig) => {
     const workbookState = buildTemplateWorkbook(template);
+    const nextSheet: WorkbookSheetState = {
+      sheetId: `sheet_${template.templateId}`,
+      sheetName: 'Sheet1',
+      rows: workbookState.rows,
+      years: workbookState.headers,
+      outputConfigs: workbookState.outputConfigs,
+      metricDrafts: workbookState.metricDrafts,
+      metricBindings: [],
+      inputCellModes: Object.fromEntries(Object.keys(workbookState.metricDrafts).map((cell) => [cell, 'custom' as InputCellMode])),
+      headerColumnModes: Object.fromEntries(columns.slice(1, workbookState.headers.length + 1).map((column) => [column, 'system' as HeaderColumnMode])),
+      columnParamType: template.columnParamType ?? 'fieldCode',
+      activeColumnCount: Math.max(2, workbookState.headers.length + 1),
+      detectedObjectType: template.applicableObject === 'issuer' ? 'issuer' : 'bond',
+      columnProfiles: [],
+    };
     setTemplatePickerOpen(false);
     setSelectedTemplateId(template.templateId);
+    setWorkbookSheets([nextSheet]);
+    setActiveSheetId(nextSheet.sheetId);
+    setWorkbookFileName(`${template.templateName}.xlsx`);
     setGridRows(workbookState.rows);
     setYears(workbookState.headers);
     setMetricBindings([]);
     setOutputConfigs(workbookState.outputConfigs);
     setMetricDrafts(workbookState.metricDrafts);
+    setInputCellModes(Object.fromEntries(Object.keys(workbookState.metricDrafts).map((cell) => [cell, 'custom' as InputCellMode])));
+    setHeaderColumnModes(Object.fromEntries(columns.slice(1, workbookState.headers.length + 1).map((column) => [column, 'system' as HeaderColumnMode])));
+    setColumnParamType(template.columnParamType ?? 'fieldCode');
+    setActiveColumnCount(Math.max(2, workbookState.headers.length + 1));
     setSelection({
-      sheetId: workbook.activeSheetId,
-      sheetName: workbook.activeSheetName,
+      sheetId: nextSheet.sheetId,
+      sheetName: nextSheet.sheetName,
       address: 'A2',
       activeCell: 'A2',
     });
@@ -546,7 +913,7 @@ function App() {
             search={templateSearch}
             onSearchChange={setTemplateSearch}
             onOpenTemplate={applyTemplate}
-            onOpenBlank={openBlankWorkbook}
+            onOpenImport={openImportDialog}
           />
         </div>
       ) : (
@@ -562,12 +929,17 @@ function App() {
           />
           {activeModule.id === 'data-assistant' ? (
             <main className="excel-pane">
-              <WorkbookHeader selectedTemplate={selectedTemplate} onBackToTemplates={() => setViewMode('templateHome')} />
+              <WorkbookHeader
+                selectedTemplate={selectedTemplate}
+                workbookFileName={workbookFileName}
+                onBackToTemplates={() => setViewMode('templateHome')}
+              />
               <Ribbon
                 onRefresh={refreshOutputs}
                 onSaveTemplate={requestSaveTemplate}
                 onShowAudit={() => setFormulaPanelMode('audit')}
                 onExportTable={() => setFormulaPanelMode('export')}
+                onOpenImport={openImportDialog}
               />
               <FormulaBar activeCell={selection.activeCell} value={selectedFormulaValue} />
               <SpreadsheetGrid
@@ -575,16 +947,33 @@ function App() {
                 selection={selection}
                 years={years}
                 outputConfigs={outputConfigs}
+                columnProfiles={activeWorkbookSheet?.columnProfiles ?? []}
                 activeSuggestionCell={activeSuggestionCell}
                 enableMetricSuggestions={!selectedTemplate}
                 metricDrafts={metricDrafts}
+                inputCellModes={inputCellModes}
+                headerColumnModes={headerColumnModes}
+                columnParamType={columnParamType}
+                activeColumnCount={activeColumnCount}
                 onSelect={handleSelect}
                 onYearChange={updateYear}
-                onMetricDraftChange={(cell, value) => setMetricDrafts((current) => ({ ...current, [cell]: value }))}
+                onMetricDraftChange={updateInputDraft}
                 onBindMetric={bindMetricToRow}
+                onBindField={bindFieldToColumn}
+                onHeaderChange={updateImportedHeader}
+                onHeaderDraftChange={updateHeaderDraft}
+                onKeepCustomInput={keepCustomInput}
+                onKeepCustomHeader={keepCustomHeader}
+                onResultDraftChange={updateResultCell}
+                onAddColumn={addColumn}
                 onContextMenu={openContextMenu}
               />
-              <SheetFooter selectedRange={selection.address} />
+              <SheetFooter
+                selectedRange={selection.address}
+                sheets={workbookSheets}
+                activeSheetId={activeSheetId}
+                onSwitchSheet={switchSheet}
+              />
             </main>
           ) : (
             <ModuleWorkspace module={activeModule} />
@@ -627,8 +1016,17 @@ function App() {
           search={templatePickerSearch}
           onSearchChange={setTemplatePickerSearch}
           onOpenTemplate={applyTemplate}
-          onOpenBlank={openBlankWorkbook}
           onClose={() => setTemplatePickerOpen(false)}
+        />
+      )}
+      {importDialogOpen && (
+        <ImportWorkbookModal
+          draft={importDraft}
+          error={importError}
+          onFileChange={handleImportFile}
+          onClose={() => setImportDialogOpen(false)}
+          onConfirm={confirmImportWorkbook}
+          onSheetTypeChange={updateImportSheetType}
         />
       )}
     </div>
@@ -788,16 +1186,16 @@ function TemplateHome({
   search,
   onSearchChange,
   onOpenTemplate,
-  onOpenBlank,
+  onOpenImport,
 }: {
   templates: TemplateConfig[];
   search: string;
   onSearchChange: (value: string) => void;
   onOpenTemplate: (template: TemplateConfig) => void;
-  onOpenBlank: () => void;
+  onOpenImport: () => void;
 }) {
-  const recommended = templates.slice(0, 7);
-  const latest = templates.slice().reverse().slice(0, 4);
+  const issuerTemplates = templates.filter((template) => template.applicableObject === 'issuer');
+  const bondTemplates = templates.filter((template) => template.applicableObject !== 'issuer');
 
   return (
     <main className="template-home">
@@ -813,32 +1211,59 @@ function TemplateHome({
         </label>
       </section>
       <section className="template-home-content">
-        <div className="template-section-title">
-          <h1>为你推荐</h1>
-          <span>债券取数模板</span>
-        </div>
-        <div className="template-card-grid">
-          <button className="template-blank-card" type="button" onClick={onOpenBlank}>
-            <Plus size={58} />
-            <strong>新建空白表</strong>
-            <span>从空白表开始，适合临时探索</span>
+        <section className="template-import-entry">
+          <button className="import-entry-card" type="button" onClick={onOpenImport}>
+            <span className="import-entry-icon">
+              <UploadCloud size={30} />
+            </span>
+            <div>
+              <strong>导入 Excel</strong>
+              <p>上传客户已有工作簿，保留多个 Sheet，自动识别主体/债券列和可取数字段。</p>
+            </div>
+            <small>未识别指标会标红保留，不参与刷新覆盖</small>
           </button>
-          {recommended.map((template) => (
-            <TemplateLibraryCard template={template} key={template.templateId} onOpen={() => onOpenTemplate(template)} />
-          ))}
-        </div>
-        <div className="template-section-title latest">
-          <h2>最新</h2>
-          <span>最近更新模板</span>
-          <button type="button">查看更多</button>
-        </div>
-        <div className="template-card-grid compact">
-          {latest.map((template) => (
-            <TemplateLibraryCard template={template} key={`latest-${template.templateId}`} onOpen={() => onOpenTemplate(template)} />
-          ))}
-        </div>
+        </section>
+        <TemplateGroup title="主体模板" subtitle="按主体名称、报告期和授信指标取数" templates={issuerTemplates} onOpenTemplate={onOpenTemplate} />
+        <TemplateGroup title="债券模板" subtitle="按债券代码、估值日和发行区间取数" templates={bondTemplates} onOpenTemplate={onOpenTemplate} />
       </section>
     </main>
+  );
+}
+
+function TemplateGroup({
+  title,
+  subtitle,
+  templates,
+  onOpenTemplate,
+}: {
+  title: string;
+  subtitle: string;
+  templates: TemplateConfig[];
+  onOpenTemplate: (template: TemplateConfig) => void;
+}) {
+  if (templates.length === 0) {
+    return (
+      <section className="template-group">
+        <div className="template-section-title">
+          <h1>{title}</h1>
+          <span>没有匹配模板</span>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="template-group">
+      <div className="template-section-title">
+        <h1>{title}</h1>
+        <span>{subtitle}</span>
+      </div>
+      <div className="template-card-grid">
+        {templates.map((template) => (
+          <TemplateLibraryCard template={template} key={template.templateId} onOpen={() => onOpenTemplate(template)} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -875,16 +1300,17 @@ function TemplatePickerModal({
   search,
   onSearchChange,
   onOpenTemplate,
-  onOpenBlank,
   onClose,
 }: {
   templates: TemplateConfig[];
   search: string;
   onSearchChange: (value: string) => void;
   onOpenTemplate: (template: TemplateConfig) => void;
-  onOpenBlank: () => void;
   onClose: () => void;
 }) {
+  const issuerTemplates = templates.filter((template) => template.applicableObject === 'issuer');
+  const bondTemplates = templates.filter((template) => template.applicableObject !== 'issuer');
+
   return (
     <div className="modal-backdrop template-picker-backdrop" onClick={onClose}>
       <section className="template-picker-modal" onClick={(event) => event.stopPropagation()}>
@@ -903,24 +1329,100 @@ function TemplatePickerModal({
           </button>
         </div>
         <div className="template-picker-content">
-          <div className="template-section-title">
-            <h1>为你推荐</h1>
-            <span>债券取数模板</span>
+          <TemplateGroup title="主体模板" subtitle="按主体名称、报告期和授信指标取数" templates={issuerTemplates} onOpenTemplate={onOpenTemplate} />
+          <TemplateGroup title="债券模板" subtitle="按债券代码、估值日和发行区间取数" templates={bondTemplates} onOpenTemplate={onOpenTemplate} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ImportWorkbookModal({
+  draft,
+  error,
+  onFileChange,
+  onClose,
+  onConfirm,
+  onSheetTypeChange,
+}: {
+  draft: ImportDraft | null;
+  error: string;
+  onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onClose: () => void;
+  onConfirm: () => void;
+  onSheetTypeChange: (sheetId: string, objectType: DetectedObjectType) => void;
+}) {
+  return (
+    <div className="modal-backdrop import-backdrop" onClick={onClose}>
+      <section className="import-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <UploadCloud size={20} />
+            <strong>导入 Excel</strong>
           </div>
-          <div className="template-card-grid picker">
-            <button className="template-blank-card" type="button" onClick={onOpenBlank}>
-              <Plus size={58} />
-              <strong>新建空白表</strong>
-              <span>从空白表开始，适合临时探索</span>
-            </button>
-            {templates.map((template) => (
-              <TemplateLibraryCard
-                template={template}
-                key={`picker-${template.templateId}`}
-                onOpen={() => onOpenTemplate(template)}
-              />
-            ))}
-          </div>
+          <button type="button" onClick={onClose} aria-label="关闭导入">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="import-body">
+          <label className="excel-upload-zone">
+            <UploadCloud size={34} />
+            <strong>上传 .xlsx 工作簿</strong>
+            <span>系统会保留多个 Sheet，并逐表识别主体/债券字段和指标列。</span>
+            <input type="file" accept=".xlsx" onChange={onFileChange} />
+          </label>
+          {error && <div className="import-error">{error}</div>}
+          {draft && (
+            <div className="import-preview">
+              <div className="import-summary">
+                <strong>{draft.fileName}</strong>
+                <span>{draft.sheets.length} 个 Sheet</span>
+              </div>
+              <div className="import-sheet-list">
+                {draft.sheets.map((sheetItem) => (
+                  <article className="import-sheet-card" key={sheetItem.sheetId}>
+                    <div className="import-sheet-head">
+                      <div>
+                        <strong>{sheetItem.sheetName}</strong>
+                        <span>
+                          {objectTypeLabel(sheetItem.detectedObjectType)} · {sheetItem.customMetricCount} 个未识别指标
+                        </span>
+                      </div>
+                      <select
+                        value={sheetItem.detectedObjectType}
+                        onChange={(event) => onSheetTypeChange(sheetItem.sheetId, event.target.value as DetectedObjectType)}
+                        aria-label={`${sheetItem.sheetName} 对象类型`}
+                      >
+                        <option value="bond">债券表</option>
+                        <option value="issuer">主体表</option>
+                        <option value="unknown">待确认</option>
+                      </select>
+                    </div>
+                    <div className="import-preview-table">
+                      {sheetItem.previewRows.map((row, rowIndex) => (
+                        <div className="import-preview-row" key={`${sheetItem.sheetId}-${rowIndex}`}>
+                          {row.slice(0, 6).map((cell, cellIndex) => (
+                            <span
+                              className={sheetItem.columnProfiles[cellIndex]?.role === 'custom_metric' ? 'preview-custom' : ''}
+                              key={`${sheetItem.sheetId}-${rowIndex}-${cellIndex}`}
+                            >
+                              {cell}
+                            </span>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="import-actions">
+          <button type="button" onClick={onClose}>取消</button>
+          <button className="primary" type="button" disabled={!draft} onClick={onConfirm}>
+            导入工作台
+          </button>
         </div>
       </section>
     </div>
@@ -929,9 +1431,11 @@ function TemplatePickerModal({
 
 function WorkbookHeader({
   selectedTemplate,
+  workbookFileName,
   onBackToTemplates,
 }: {
   selectedTemplate: TemplateConfig | null;
+  workbookFileName: string;
   onBackToTemplates: () => void;
 }) {
   return (
@@ -939,7 +1443,7 @@ function WorkbookHeader({
       <div className="tabs">
         <div className="file-tab active">
           <FileSpreadsheet size={14} />
-          {selectedTemplate ? `${selectedTemplate.templateName}.xlsx` : '海底捞利润表_2021-2025.xlsx'}
+          {selectedTemplate ? `${selectedTemplate.templateName}.xlsx` : workbookFileName}
           <X size={13} />
         </div>
         <div className="file-tab">
@@ -949,7 +1453,7 @@ function WorkbookHeader({
         <button className="tab-plus">+</button>
       </div>
       <div className="pathline">
-        tree &gt; 模板库 &gt; {selectedTemplate?.templateName ?? '新建空白表'}
+        tree &gt; 模板库 &gt; {selectedTemplate?.templateName ?? '工作表'}
         <span>最近修改: 05月07 15:46</span>
         <button type="button" onClick={onBackToTemplates}>返回模板库</button>
       </div>
@@ -962,11 +1466,13 @@ function Ribbon({
   onSaveTemplate,
   onShowAudit,
   onExportTable,
+  onOpenImport,
 }: {
   onRefresh: () => void;
   onSaveTemplate: () => void;
   onShowAudit: () => void;
   onExportTable: () => void;
+  onOpenImport: () => void;
 }) {
   return (
     <section className="ribbon">
@@ -1006,6 +1512,10 @@ function Ribbon({
           <FileSpreadsheet size={15} />
           导出表格
         </button>
+        <button onClick={onOpenImport}>
+          <UploadCloud size={15} />
+          导入 Excel
+        </button>
       </div>
     </section>
   );
@@ -1030,32 +1540,68 @@ function SpreadsheetGrid({
   selection,
   years,
   outputConfigs,
+  columnProfiles,
   activeSuggestionCell,
   enableMetricSuggestions,
   metricDrafts,
+  inputCellModes,
+  headerColumnModes,
+  columnParamType,
+  activeColumnCount,
   onSelect,
   onYearChange,
   onMetricDraftChange,
   onBindMetric,
+  onBindField,
+  onHeaderChange,
+  onHeaderDraftChange,
+  onKeepCustomInput,
+  onKeepCustomHeader,
+  onResultDraftChange,
+  onAddColumn,
   onContextMenu,
 }: {
   rows: string[][];
   selection: CellSelection;
   years: string[];
   outputConfigs: Record<string, OutputCellConfig>;
+  columnProfiles: ImportedColumnProfile[];
   activeSuggestionCell: string | null;
   enableMetricSuggestions: boolean;
   metricDrafts: Record<string, string>;
+  inputCellModes: Record<string, InputCellMode>;
+  headerColumnModes: Record<string, HeaderColumnMode>;
+  columnParamType: ColumnParamType;
+  activeColumnCount: number;
   onSelect: (address: string) => void;
   onYearChange: (columnIndex: number, value: string) => void;
   onMetricDraftChange: (cell: string, value: string) => void;
   onBindMetric: (row: number, metric: MetricDefinition) => void;
+  onBindField: (columnIndex: number, field: FieldDefinition) => void;
+  onHeaderChange: (columnIndex: number, value: string) => void;
+  onHeaderDraftChange: (columnIndex: number, value: string) => void;
+  onKeepCustomInput: (cell: string, value: string) => void;
+  onKeepCustomHeader: (columnIndex: number, value: string) => void;
+  onResultDraftChange: (cell: string, value: string) => void;
+  onAddColumn: () => void;
   onContextMenu: (event: MouseEvent, address?: string) => void;
 }) {
   const rowCount = 55;
-  const activeSuggestionRow = activeSuggestionCell ? parseCell(activeSuggestionCell).row : 0;
+  const activePosition = activeSuggestionCell ? parseCell(activeSuggestionCell) : null;
+  const activeSuggestionRow = activePosition?.row ?? 0;
+  const activeSuggestionColumn = activePosition?.column ?? 0;
+  const activeSuggestionContext = activeSuggestionCell ? getSuggestionContext(activeSuggestionCell, activeColumnCount) : null;
   const activeQuery = activeSuggestionCell ? metricDrafts[activeSuggestionCell] ?? getCellValue(rows, activeSuggestionCell) : '';
-  const suggestions = activeSuggestionCell && enableMetricSuggestions ? findMetricCandidates(activeQuery) : [];
+  const fieldQuery =
+    activeSuggestionCell && activeSuggestionContext === 'headerCol' ? years[activeSuggestionColumn - 2] ?? activeQuery : activeQuery;
+  const metricSuggestions =
+    activeSuggestionCell && enableMetricSuggestions && activeSuggestionContext === 'metricRow'
+      ? findMetricCandidates(activeQuery)
+      : [];
+  const fieldSuggestions =
+    activeSuggestionCell && enableMetricSuggestions && activeSuggestionContext === 'headerCol'
+      ? findFieldCandidates(fieldQuery)
+      : [];
 
   return (
     <section className="grid-wrap" onContextMenu={(event) => onContextMenu(event, selection.address)}>
@@ -1063,7 +1609,7 @@ function SpreadsheetGrid({
         <thead>
           <tr>
             <th className="corner" />
-            {columns.map((column) => (
+            {columns.slice(0, activeColumnCount).map((column) => (
               <th key={column}>{column}</th>
             ))}
           </tr>
@@ -1075,23 +1621,42 @@ function SpreadsheetGrid({
             return (
               <tr key={rowNumber}>
                 <th>{rowNumber}</th>
-                {columns.map((column, columnIndex) => {
+                {columns.slice(0, Math.min(columns.length, activeColumnCount + 1)).map((column, columnIndex) => {
                   const address = `${column}${rowNumber}`;
+                  const isAddColumnCell = rowNumber === 1 && columnIndex === activeColumnCount && activeColumnCount < columns.length;
+                  if (isAddColumnCell) {
+                    return (
+                      <td className="add-column-cell" key={address} onClick={onAddColumn}>
+                        <Plus size={16} />
+                      </td>
+                    );
+                  }
                   const value = row[columnIndex] ?? '';
                   const selected = isSelectedCell(rowNumber, columnIndex + 1, selection.address);
-                  const isHeader = rowNumber === 1 && columnIndex < 8;
+                  const isHeader = rowNumber === 1 && columnIndex < activeColumnCount;
                   const isMetricInput = columnIndex === 0 && rowNumber >= 2 && rowNumber <= 13;
-                  const isYearInput = rowNumber === 1 && columnIndex >= 1 && columnIndex < 8;
+                  const isYearInput = rowNumber === 1 && columnIndex >= 1 && columnIndex < activeColumnCount;
+                  const isResultArea = columnIndex >= 1 && columnIndex < activeColumnCount && rowNumber >= 2 && rowNumber <= 13;
                   const outputConfig = outputConfigs[address];
                   const isOutput = Boolean(outputConfig);
+                  const columnProfile = columnProfiles.find((profile) => profile.index === columnIndex);
+                  const isImportedHeader = rowNumber === 1 && Boolean(columnProfile);
+                  const isCustomMetric = isImportedHeader && columnProfile?.role === 'custom_metric';
+                  const isRecognizedMetric = isImportedHeader && columnProfile?.role === 'recognized_metric';
+                  const isEntityKey = isImportedHeader && columnProfile?.role === 'entity_key';
 
                   return (
                     <td
                       className={[
                         selected ? 'selected-cell' : '',
                         isHeader ? 'table-header-cell' : '',
-                        isMetricInput || isYearInput ? 'input-cell' : '',
-                        isYearInput ? 'year-input-cell' : '',
+                        isImportedHeader ? 'imported-header-cell' : '',
+                        isMetricInput || isYearInput ? 'input-zone-cell' : '',
+                        isMetricInput ? `input-mode-${inputCellModes[address] ?? 'custom'}` : '',
+                        isYearInput ? 'column-param-input-cell' : '',
+                        isYearInput ? `header-mode-${headerColumnModes[column] ?? 'custom'}` : '',
+                        isResultArea ? 'result-zone-cell' : '',
+                        isResultArea && !isOutput ? 'result-zone-custom' : '',
                         isOutput ? `output-cell status-${outputConfig.status}` : '',
                         isOutput ? 'number-cell' : '',
                       ].join(' ')}
@@ -1105,18 +1670,46 @@ function SpreadsheetGrid({
                         onContextMenu(event, selected ? selection.address : address);
                       }}
                     >
-                      {isYearInput ? (
+                      {isImportedHeader && (isCustomMetric || isRecognizedMetric) ? (
                         <input
-                          value={years[columnIndex - 1] ?? ''}
-                          onChange={(event) => onYearChange(columnIndex + 1, event.target.value)}
-                          aria-label={`${address} 年份`}
+                          className="metric-input imported-header-input"
+                          value={value}
+                          onChange={(event) => onHeaderChange(columnIndex, event.target.value)}
+                          aria-label={`${address} 导入指标列名`}
                         />
+                      ) : isYearInput ? (
+                        <div className="input-cell-editor header-cell-editor">
+                          <input
+                            value={years[columnIndex - 1] ?? ''}
+                            onChange={(event) => {
+                              onHeaderDraftChange(columnIndex + 1, event.target.value);
+                              onSelect(address);
+                            }}
+                            onBlur={(event) => {
+                              if (headerColumnModes[column] !== 'system') onKeepCustomHeader(columnIndex + 1, event.target.value);
+                            }}
+                            onFocus={() => onSelect(address)}
+                            aria-label={`${address} column parameter`}
+                          />
+                          <span>{headerColumnModes[column] === 'system' ? '字段' : '自定义'}</span>
+                        </div>
                       ) : isMetricInput ? (
+                        <div className="input-cell-editor">
+                          <input
+                            className="metric-input"
+                            value={metricDrafts[address] ?? value}
+                            placeholder={rowNumber === 13 ? '输入函数 / 指标 / 自定义项' : ''}
+                            onChange={(event) => onMetricDraftChange(address, event.target.value)}
+                            onFocus={() => onSelect(address)}
+                          />
+                          <span>{inputCellModes[address] === 'system' ? '函数' : '自定义'}</span>
+                        </div>
+                      ) : isResultArea && !isOutput ? (
                         <input
-                          className="metric-input"
-                          value={metricDrafts[address] ?? value}
-                          placeholder={rowNumber === 13 ? '输入或搜索指标' : ''}
-                          onChange={(event) => onMetricDraftChange(address, event.target.value)}
+                          className="result-input"
+                          value={value}
+                          placeholder="可输入文本或函数"
+                          onChange={(event) => onResultDraftChange(address, event.target.value)}
                           onFocus={() => onSelect(address)}
                         />
                       ) : (
@@ -1130,19 +1723,41 @@ function SpreadsheetGrid({
           })}
         </tbody>
       </table>
-      {activeSuggestionCell && enableMetricSuggestions && (
-        <div className="suggestion-popover" style={{ top: 78 + activeSuggestionRow * 22 }}>
+      {activeSuggestionCell && enableMetricSuggestions && activeSuggestionContext && (
+        <div className="suggestion-popover" style={{ top: activeSuggestionContext === 'headerCol' ? 78 : 78 + activeSuggestionRow * 22 }}>
           <div className="suggestion-title">
             <Search size={14} />
-            可输入内容 / 指标联想
+            {activeSuggestionContext === 'headerCol'
+              ? `表头：${columnParamType === 'date' ? '选择日期字段' : columnParamType === 'year' ? '输入年份' : '选择系统字段'}`
+              : '输入项：选择函数或保留自定义'}
           </div>
-          {suggestions.map((metric) => (
-            <button key={metric.code} onClick={() => onBindMetric(activeSuggestionRow, metric)}>
+          {activeSuggestionContext === 'metricRow' && metricSuggestions.map((metric) => (
+            <button key={metric.code} onMouseDown={(event) => event.preventDefault()} onClick={() => onBindMetric(activeSuggestionRow, metric)}>
               <strong>{metric.label}</strong>
               <span>{metric.category} · {metric.unit} · {metric.source}</span>
               <small>{metric.description}</small>
             </button>
           ))}
+          {activeSuggestionContext === 'headerCol' && fieldSuggestions.map((field) => (
+            <button key={field.code} onMouseDown={(event) => event.preventDefault()} onClick={() => onBindField(activeSuggestionColumn, field)}>
+              <strong>{field.label}</strong>
+              <span>{field.code} · {field.category} · {field.unit}</span>
+              <small>{field.description}</small>
+            </button>
+          ))}
+          <button
+            className="custom-suggestion"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              if (!activeSuggestionCell) return;
+              if (activeSuggestionContext === 'headerCol') onKeepCustomHeader(activeSuggestionColumn, fieldQuery);
+              else onKeepCustomInput(activeSuggestionCell, activeQuery);
+            }}
+          >
+            <strong>{activeSuggestionContext === 'headerCol' ? '保留为自定义列' : '保留为自定义输入'}</strong>
+            <span>{activeSuggestionContext === 'headerCol' ? fieldQuery || '空白自定义列' : activeQuery || '空白自定义项'}</span>
+            <small>自定义内容会保留，不绑定系统后端取数函数。</small>
+          </button>
         </div>
       )}
     </section>
@@ -1399,7 +2014,7 @@ function AuditPanel({
           <div className="formula-row" key={config.targetCell}>
             <span>{config.targetCell}</span>
             <code>
-              metric={config.metricCode}; yearCell={config.yearCell}; status={statusText(config.status)}
+              metric={config.metricCode}; columnParamCell={config.columnParamCell}; status={statusText(config.status)}
             </code>
           </div>
         ))}
@@ -1537,37 +2152,62 @@ function ContextMenu({ x, y, onRun }: { x: number; y: number; onRun: (label: str
   );
 }
 
-function SheetFooter({ selectedRange }: { selectedRange: string }) {
+function SheetFooter({
+  selectedRange,
+  sheets,
+  activeSheetId,
+  onSwitchSheet,
+}: {
+  selectedRange: string;
+  sheets: WorkbookSheetState[];
+  activeSheetId: string;
+  onSwitchSheet: (sheetId: string) => void;
+}) {
+  const activeSheet = sheets.find((item) => item.sheetId === activeSheetId) ?? sheets[0];
+  const customCount = activeSheet?.columnProfiles.filter((item) => item.role === 'custom_metric').length ?? 0;
   return (
     <footer className="sheet-footer">
       <div className="sheet-tabs">
         <button className="sheet-nav">‹</button>
         <button className="sheet-nav">›</button>
-        <button className="sheet-tab active">Sheet1</button>
+        {sheets.map((item) => (
+          <button
+            className={`sheet-tab ${item.sheetId === activeSheetId ? 'active' : ''}`}
+            key={item.sheetId}
+            onClick={() => onSwitchSheet(item.sheetId)}
+          >
+            {item.sheetName}
+          </button>
+        ))}
         <button className="sheet-plus">+</button>
       </div>
       <div className="status">
         <span>就绪</span>
         <span>选区: {selectedRange}</span>
-        <span>输入区 A2:A13</span>
+        <span>{activeSheet ? objectTypeLabel(activeSheet.detectedObjectType) : '工作表'}</span>
+        {customCount > 0 && <span>{customCount} 个自定义指标</span>}
         <span>100%</span>
       </div>
     </footer>
   );
 }
 
-function buildAiRequest(query: string, selection: CellSelection): AiRequest {
+function buildAiRequest(
+  query: string,
+  selection: CellSelection,
+  activeWorkbook = workbook,
+  activeSheet = sheet,
+): AiRequest {
   return {
     query,
-    workbook,
-    sheet,
+    workbook: activeWorkbook,
+    sheet: activeSheet,
     selectedRange: selection,
     referencedContexts: query.includes('@Sheet1') ? contextReferences : [],
   };
 }
 
 function renderOutputValue(config: OutputCellConfig) {
-  if (config.status === 'pendingRefresh') return '待刷新';
   if (config.status === 'loading') return '刷新中';
   if (config.status === 'failed') return '失败';
   return config.value ?? '';
@@ -1576,7 +2216,6 @@ function renderOutputValue(config: OutputCellConfig) {
 function statusText(status: OutputStatus) {
   return {
     empty: '空',
-    pendingRefresh: '待刷新',
     loading: '刷新中',
     ready: '已刷新',
     failed: '失败',
@@ -1589,6 +2228,194 @@ function objectScopeText(scope: TemplateConfig['applicableObject']) {
     bond: '债券',
     bond_set: '债券集合',
   }[scope];
+}
+
+function objectTypeLabel(type: DetectedObjectType) {
+  return {
+    issuer: '主体表',
+    bond: '债券表',
+    unknown: '待确认',
+  }[type];
+}
+
+function normalizeHeader(value: string) {
+  return value.replace(/\s+/g, '').replace(/[()（）_\-—/\\]/g, '').toLowerCase();
+}
+
+function stringifyCell(value: string | number | Date | boolean | null | undefined) {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function detectObjectType(rows: string[][], headerRowIndex: number): DetectedObjectType {
+  const sample = rows.slice(headerRowIndex, headerRowIndex + 8).flat().join(' ');
+  const normalizedSample = normalizeHeader(sample);
+  const hasBondHeader = ['债券代码', '证券代码', '债券简称', '债券全称'].some((keyword) =>
+    normalizedSample.includes(normalizeHeader(keyword)),
+  );
+  const hasBondCodeValue = /\b\d{6,9}\.(IB|SH|SZ|BJ|银行间)\b/i.test(sample);
+  if (hasBondHeader || hasBondCodeValue) return 'bond';
+
+  const hasIssuerHeader = ['主体名称', '发行人', '公司名称', '企业名称'].some((keyword) =>
+    normalizedSample.includes(normalizeHeader(keyword)),
+  );
+  return hasIssuerHeader ? 'issuer' : 'unknown';
+}
+
+function findHeaderRow(rows: string[][]) {
+  const keyWords = ['债券代码', '证券代码', '债券简称', '主体名称', '发行人', '公司名称', '估值日期', '报告期'];
+  let bestIndex = rows.findIndex((row) => row.some(Boolean));
+  let bestScore = -1;
+
+  rows.slice(0, 8).forEach((row, index) => {
+    const text = normalizeHeader(row.join(' '));
+    const nonEmptyCount = row.filter(Boolean).length;
+    const keywordScore = keyWords.filter((keyword) => text.includes(normalizeHeader(keyword))).length * 4;
+    const score = keywordScore + Math.min(nonEmptyCount, 8);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  });
+
+  return Math.max(bestIndex, 0);
+}
+
+function buildMetricDictionary(objectType: DetectedObjectType) {
+  return defaultTemplates
+    .filter((template) => {
+      if (objectType === 'issuer') return template.applicableObject === 'issuer';
+      if (objectType === 'bond') return template.applicableObject !== 'issuer';
+      return true;
+    })
+    .flatMap((template) =>
+      template.defaultOutputFields.map((fieldName) => ({
+        normalized: normalizeHeader(fieldName),
+        fieldName,
+        metricCode: `${template.hiddenFetchConfig.interfaceName}.${template.hiddenFetchConfig.fieldMapping[fieldName] ?? fieldName}`,
+        fetchInterface: template.hiddenFetchConfig.interfaceName,
+      })),
+    );
+}
+
+function classifyImportedColumn(
+  header: string,
+  index: number,
+  objectType: DetectedObjectType,
+): ImportedColumnProfile {
+  const normalized = normalizeHeader(header);
+  if (!normalized) return { index, header, role: 'ignored' };
+
+  const bondKeys = ['债券代码', '证券代码', '债券简称', '债券全称', 'isin代码', '发行人名称'];
+  const issuerKeys = ['主体名称', '发行人', '公司名称', '企业名称'];
+  const entityKeys = objectType === 'bond' ? bondKeys : objectType === 'issuer' ? issuerKeys : [...bondKeys, ...issuerKeys];
+  if (entityKeys.some((keyword) => normalized.includes(normalizeHeader(keyword)))) {
+    return { index, header, role: 'entity_key' };
+  }
+
+  const match = buildMetricDictionary(objectType).find((item) => item.normalized === normalized);
+  if (match) {
+    return {
+      index,
+      header,
+      role: 'recognized_metric',
+      metricCode: match.metricCode,
+      fetchInterface: match.fetchInterface,
+      fieldName: match.fieldName,
+    };
+  }
+
+  return { index, header, role: 'custom_metric' };
+}
+
+function padImportedRows(rows: string[][]) {
+  const normalizedRows = rows.map((row) => columns.map((_, index) => row[index] ?? ''));
+  while (normalizedRows.length < 55) {
+    normalizedRows.push(Array.from({ length: columns.length }, () => ''));
+  }
+  return normalizedRows;
+}
+
+function buildImportedSheetState(
+  rawRows: Array<Array<string | number | Date | boolean | null | undefined>>,
+  sheetName: string,
+  index: number,
+  objectTypeOverride?: DetectedObjectType,
+): ImportDraftSheet {
+  const cleanedRows = rawRows
+    .map((row) => row.map(stringifyCell))
+    .filter((row) => row.some(Boolean));
+  const headerRowIndex = findHeaderRow(cleanedRows);
+  const objectType = objectTypeOverride ?? detectObjectType(cleanedRows, headerRowIndex);
+  const rows = padImportedRows(cleanedRows.slice(headerRowIndex));
+  const header = rows[0] ?? [];
+  const columnProfiles = header.map((cell, columnIndex) => classifyImportedColumn(cell, columnIndex, objectType));
+  const entityColumn = columnProfiles.find((profile) => profile.role === 'entity_key')?.index ?? 0;
+  const outputConfigs: Record<string, OutputCellConfig> = {};
+  const metricBindings: MetricBinding[] = [];
+
+  columnProfiles.forEach((profile) => {
+    if (profile.role !== 'recognized_metric' || !profile.metricCode) return;
+    const metricCode = profile.metricCode;
+    const metricColumn = columns[profile.index] ?? 'A';
+    metricBindings.push({
+      row: 1,
+      cell: `${metricColumn}1`,
+      displayName: profile.header,
+      metricCode,
+      source: profile.fetchInterface ?? 'DM_DATA',
+      disambiguationStatus: 'confirmed',
+    });
+    rows.slice(1).forEach((row, rowIndex) => {
+      if (!row.some(Boolean)) return;
+      const targetCell = makeCellAddress(profile.index + 1, rowIndex + 2);
+      outputConfigs[targetCell] = {
+        targetCell,
+        metricCell: `${metricColumn}1`,
+        columnParamCell: `${metricColumn}1`,
+        metricCode,
+        columnParam: profile.fieldName ?? profile.header,
+        status: 'ready',
+        value: row[profile.index] ?? '',
+        fetchInterface: profile.fetchInterface,
+        fieldName: profile.fieldName ?? profile.header,
+        parameterCell: makeCellAddress(entityColumn + 1, rowIndex + 2),
+      };
+    });
+  });
+
+  return {
+    sheetId: `import_sheet_${index + 1}`,
+    sheetName: sheetName || `Sheet${index + 1}`,
+    rows,
+    years: header.slice(1, 8),
+    outputConfigs,
+    metricDrafts: {},
+    metricBindings,
+    inputCellModes: {},
+    headerColumnModes: Object.fromEntries(
+      columnProfiles.slice(1, 8).map((profile) => [
+        columns[profile.index] ?? 'B',
+        profile.role === 'recognized_metric' ? ('system' as HeaderColumnMode) : ('custom' as HeaderColumnMode),
+      ]),
+    ),
+    columnParamType: 'fieldCode',
+    activeColumnCount: Math.min(columns.length, Math.max(8, header.filter(Boolean).length || 8)),
+    detectedObjectType: objectType,
+    columnProfiles,
+    previewRows: rows.slice(0, 5),
+    customMetricCount: columnProfiles.filter((profile) => profile.role === 'custom_metric').length,
+  };
+}
+
+function rebuildImportedSheetWithObjectType(sheetState: ImportDraftSheet, objectType: DetectedObjectType) {
+  const rebuilt = buildImportedSheetState(sheetState.rows, sheetState.sheetName, Number(sheetState.sheetId.replace(/\D/g, '')) || 0, objectType);
+  return {
+    ...rebuilt,
+    sheetId: sheetState.sheetId,
+    sheetName: sheetState.sheetName,
+  };
 }
 
 function filterTemplates(templates: TemplateConfig[], search: string) {
@@ -1633,11 +2460,12 @@ function buildTemplateWorkbook(template: TemplateConfig) {
       outputConfigs[targetCell] = {
         targetCell,
         metricCell: cell,
-        yearCell: `${columns[columnIndex - 1]}1`,
+        columnParamCell: `${columns[columnIndex - 1]}1`,
         metricCode: `${template.hiddenFetchConfig.interfaceName}.${fieldKey}`,
-        year: fieldName,
-        status: 'pendingRefresh',
-        value: '',
+        columnParam: fieldName,
+        status: 'ready',
+        value: mockFetchMetricValue(`${template.hiddenFetchConfig.interfaceName}.${fieldKey}`, fieldName),
+        lastRefreshAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
         fetchInterface: template.hiddenFetchConfig.interfaceName,
         fieldName,
         parameterCell: cell,
@@ -1683,6 +2511,13 @@ function moduleStageCopy(moduleId: string, index: number) {
 function isMetricInputCell(address: string) {
   const { row, column } = parseCell(address);
   return column === 1 && row >= 2 && row <= 13;
+}
+
+function getSuggestionContext(address: string, activeColumnCount: number): SuggestionContext | null {
+  const { row, column } = parseCell(address);
+  if (column === 1 && row >= 2 && row <= 13) return 'metricRow';
+  if (row === 1 && column >= 2 && column <= activeColumnCount) return 'headerCol';
+  return null;
 }
 
 function isSelectedCell(row: number, column: number, range: string) {
