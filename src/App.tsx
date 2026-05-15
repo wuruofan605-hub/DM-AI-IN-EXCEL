@@ -88,6 +88,14 @@ type InputCellMode = 'system' | 'custom';
 type HeaderColumnMode = 'system' | 'custom';
 type SuggestionContext = 'metricRow' | 'headerCol';
 
+type AiConversation = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  pinned: boolean;
+  updatedAt: string;
+};
+
 const initialSelection: CellSelection = {
   sheetId: workbook.activeSheetId,
   sheetName: workbook.activeSheetName,
@@ -96,6 +104,18 @@ const initialSelection: CellSelection = {
 };
 
 const contextReferences: AiContextChip[] = [{ id: 'ref_sheet1', type: 'reference', label: '@Sheet1' }];
+
+function createIntroMessages(): ChatMessage[] {
+  return [
+    {
+      id: `assistant_intro_${Date.now()}`,
+      role: 'assistant',
+      text: '我已绑定当前工作簿。输入区用于放指标和参数，输出区只显示刷新后的结果；你可以右键选区，也可以在这里用自然语言告诉我想新增什么指标。',
+    },
+  ];
+}
+
+const initialConversationId = 'conversation_current';
 
 type DetectedObjectType = 'issuer' | 'bond' | 'unknown';
 
@@ -221,14 +241,34 @@ function App() {
   );
   const [selection, setSelection] = useState<CellSelection>(initialSelection);
   const [menu, setMenu] = useState<MenuState>(null);
-  const [input, setInput] = useState('生猪价格');
-  const [messages, setMessages] = useState<ChatMessage[]>([
+  const [input, setInput] = useState('????');
+  const [messages, setMessages] = useState<ChatMessage[]>(() => createIntroMessages());
+  const [activeConversationId, setActiveConversationId] = useState(initialConversationId);
+  const [activeConversationTitle, setActiveConversationTitle] = useState('???????');
+  const [aiConversations, setAiConversations] = useState<AiConversation[]>([
     {
-      id: 'assistant_intro',
-      role: 'assistant',
-      text: '我已绑定当前工作簿。输入区用于放指标和年份，输出区只显示刷新后的结果；你可以右键选区，也可以在这里用自然语言告诉我想新增什么指标。',
+      id: initialConversationId,
+      title: '???????',
+      messages: createIntroMessages(),
+      pinned: true,
+      updatedAt: '??',
+    },
+    {
+      id: 'conversation_template_setup',
+      title: '??????????',
+      messages: [{ id: 'history_template_1', role: 'assistant', text: '?????????????????????????' }],
+      pinned: false,
+      updatedAt: '??',
+    },
+    {
+      id: 'conversation_import_review',
+      title: 'Excel ????????',
+      messages: [{ id: 'history_import_1', role: 'assistant', text: '?????/????????????????????????' }],
+      pinned: false,
+      updatedAt: '??',
     },
   ]);
+  const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false);
   const [confirmationCard, setConfirmationCard] = useState<AiConfirmationCard | null>(null);
   const [saveDraft, setSaveDraft] = useState<SaveTemplateDraft | null>(null);
   const [customTemplates, setCustomTemplates] = useState<TemplateConfig[]>([]);
@@ -305,6 +345,17 @@ function App() {
     () => workbookSheets.find((item) => item.sheetId === activeSheetId) ?? workbookSheets[0],
     [activeSheetId, workbookSheets],
   );
+
+  const visibleAiConversations = useMemo(() => {
+    const snapshot: AiConversation = {
+      id: activeConversationId,
+      title: activeConversationTitle,
+      messages,
+      pinned: aiConversations.find((item) => item.id === activeConversationId)?.pinned ?? false,
+      updatedAt: '刚刚',
+    };
+    return [snapshot, ...aiConversations.filter((item) => item.id !== activeConversationId)];
+  }, [activeConversationId, activeConversationTitle, aiConversations, messages]);
 
   const currentWorkbook = useMemo(
     () => ({
@@ -657,6 +708,78 @@ function App() {
     setInput('');
   };
 
+  const upsertActiveConversation = (items: AiConversation[]) => {
+    const snapshot: AiConversation = {
+      id: activeConversationId,
+      title: activeConversationTitle,
+      messages,
+      pinned: items.find((item) => item.id === activeConversationId)?.pinned ?? false,
+      updatedAt: '刚刚',
+    };
+    const withoutCurrent = items.filter((item) => item.id !== activeConversationId);
+    return [snapshot, ...withoutCurrent].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+  };
+
+  const startNewAiConversation = () => {
+    setAiConversations((current) => upsertActiveConversation(current));
+    const nextId = `conversation_${Date.now()}`;
+    setActiveConversationId(nextId);
+    setActiveConversationTitle('新的 AI 对话');
+    setMessages([
+      {
+        id: `assistant_new_${Date.now()}`,
+        role: 'assistant',
+        text: '新的 AI 对话已创建。我会继续绑定当前工作簿和选区，你可以直接提出新的取数、审计或模板问题。',
+      },
+    ]);
+    setInput('');
+    setFormulaPanelMode(null);
+    setConfirmationCard(null);
+    setSaveDraft(null);
+  };
+
+  const openAiConversation = (conversation: AiConversation) => {
+    setAiConversations((current) => upsertActiveConversation(current));
+    setActiveConversationId(conversation.id);
+    setActiveConversationTitle(conversation.title);
+    setMessages(conversation.messages);
+    setInput('');
+    setFormulaPanelMode(null);
+  };
+
+  const toggleConversationPin = (conversationId: string) => {
+    setAiConversations((current) =>
+      current
+        .map((item) => (item.id === conversationId ? { ...item, pinned: !item.pinned } : item))
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
+    );
+  };
+
+  const renameConversation = (conversationId: string, title: string) => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle) return;
+    setAiConversations((current) => current.map((item) => (item.id === conversationId ? { ...item, title: cleanTitle } : item)));
+    if (conversationId === activeConversationId) setActiveConversationTitle(cleanTitle);
+  };
+
+  const deleteConversation = (conversationId: string) => {
+    setAiConversations((current) => current.filter((item) => item.id !== conversationId));
+    if (conversationId === activeConversationId) {
+      const nextId = `conversation_${Date.now()}`;
+      setActiveConversationId(nextId);
+      setActiveConversationTitle('新的 AI 对话');
+      setMessages([
+        {
+          id: `assistant_new_${Date.now()}`,
+          role: 'assistant',
+          text: '已删除当前会话，并为你打开一个新的 AI 对话。',
+        },
+      ]);
+      setInput('');
+      setFormulaPanelMode(null);
+    }
+  };
+
   const openContextMenu = (event: MouseEvent, address = selection.address) => {
     event.preventDefault();
     setMenu({
@@ -917,7 +1040,7 @@ function App() {
           />
         </div>
       ) : (
-        <div className="workspace">
+        <div className={`workspace ${aiPanelCollapsed ? 'ai-collapsed' : ''}`}>
           <LeftRail
             activeModule={activeModule}
             onOpenTemplates={() => setViewMode('templateHome')}
@@ -978,28 +1101,44 @@ function App() {
           ) : (
             <ModuleWorkspace module={activeModule} />
           )}
-          <AiPanel
-            input={input}
-            setInput={setInput}
-            selectedChip={selectedChip}
-            messages={messages}
-            confirmationCard={confirmationCard}
-            saveDraft={saveDraft}
-            appliedNote={appliedNote}
-            outputConfigs={outputConfigs}
-            metricBindings={metricBindings}
-            formulaPanelMode={formulaPanelMode}
-            onSubmit={handleSubmit}
-            onMetricChoice={(metricCode) =>
-              confirmationCard && setConfirmationCard({ ...confirmationCard, selectedMetricCode: metricCode })
-            }
-            onConfirmMetric={confirmMetricBinding}
-            onCancelMetric={() => confirmationCard && setConfirmationCard({ ...confirmationCard, status: 'cancelled' })}
-            onTemplateNameChange={(templateName) => saveDraft && setSaveDraft({ ...saveDraft, templateName })}
-            onConfirmSaveTemplate={confirmSaveTemplate}
-            onCancelSaveTemplate={() => saveDraft && setSaveDraft({ ...saveDraft, status: 'cancelled' })}
-            onCloseFormulaPanel={() => setFormulaPanelMode(null)}
-          />
+          {aiPanelCollapsed ? (
+            <button className="ai-collapsed-tab" type="button" onClick={() => setAiPanelCollapsed(false)} aria-label="展开 DM AI">
+              <Bot size={18} />
+              <span>AI</span>
+            </button>
+          ) : (
+            <AiPanel
+              input={input}
+              setInput={setInput}
+              selectedChip={selectedChip}
+              messages={messages}
+              conversations={visibleAiConversations}
+              activeConversationId={activeConversationId}
+              activeConversationTitle={activeConversationTitle}
+              confirmationCard={confirmationCard}
+              saveDraft={saveDraft}
+              appliedNote={appliedNote}
+              outputConfigs={outputConfigs}
+              metricBindings={metricBindings}
+              formulaPanelMode={formulaPanelMode}
+              onSubmit={handleSubmit}
+              onNewConversation={startNewAiConversation}
+              onOpenConversation={openAiConversation}
+              onToggleConversationPin={toggleConversationPin}
+              onRenameConversation={renameConversation}
+              onDeleteConversation={deleteConversation}
+              onCollapse={() => setAiPanelCollapsed(true)}
+              onMetricChoice={(metricCode) =>
+                confirmationCard && setConfirmationCard({ ...confirmationCard, selectedMetricCode: metricCode })
+              }
+              onConfirmMetric={confirmMetricBinding}
+              onCancelMetric={() => confirmationCard && setConfirmationCard({ ...confirmationCard, status: 'cancelled' })}
+              onTemplateNameChange={(templateName) => saveDraft && setSaveDraft({ ...saveDraft, templateName })}
+              onConfirmSaveTemplate={confirmSaveTemplate}
+              onCancelSaveTemplate={() => saveDraft && setSaveDraft({ ...saveDraft, status: 'cancelled' })}
+              onCloseFormulaPanel={() => setFormulaPanelMode(null)}
+            />
+          )}
         </div>
       )}
       {menu && <ContextMenu x={menu.x} y={menu.y} onRun={runMenuAction} />}
@@ -1769,6 +1908,9 @@ function AiPanel({
   setInput,
   selectedChip,
   messages,
+  conversations,
+  activeConversationId,
+  activeConversationTitle,
   confirmationCard,
   saveDraft,
   appliedNote,
@@ -1776,6 +1918,12 @@ function AiPanel({
   metricBindings,
   formulaPanelMode,
   onSubmit,
+  onNewConversation,
+  onOpenConversation,
+  onToggleConversationPin,
+  onRenameConversation,
+  onDeleteConversation,
+  onCollapse,
   onMetricChoice,
   onConfirmMetric,
   onCancelMetric,
@@ -1788,6 +1936,9 @@ function AiPanel({
   setInput: (value: string) => void;
   selectedChip: AiContextChip;
   messages: ChatMessage[];
+  conversations: AiConversation[];
+  activeConversationId: string;
+  activeConversationTitle: string;
   confirmationCard: AiConfirmationCard | null;
   saveDraft: SaveTemplateDraft | null;
   appliedNote: string;
@@ -1795,6 +1946,12 @@ function AiPanel({
   metricBindings: MetricBinding[];
   formulaPanelMode: 'audit' | 'export' | null;
   onSubmit: (event: FormEvent) => void;
+  onNewConversation: () => void;
+  onOpenConversation: (conversation: AiConversation) => void;
+  onToggleConversationPin: (conversationId: string) => void;
+  onRenameConversation: (conversationId: string, title: string) => void;
+  onDeleteConversation: (conversationId: string) => void;
+  onCollapse: () => void;
   onMetricChoice: (metricCode: string) => void;
   onConfirmMetric: () => void;
   onCancelMetric: () => void;
@@ -1803,20 +1960,98 @@ function AiPanel({
   onCancelSaveTemplate: () => void;
   onCloseFormulaPanel: () => void;
 }) {
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
+  const sortedConversations = [...conversations].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+
   return (
     <aside className="ai-panel">
       <header className="ai-header">
         <div>
           <Bot size={18} />
-          <strong>DM AI</strong>
+          <strong>{activeConversationTitle || 'DM AI'}</strong>
         </div>
         <div className="panel-icons">
-          <Plus size={15} />
-          <Bell size={15} />
-          <PanelRightClose size={16} />
-          <X size={16} />
+          <button type="button" onClick={onNewConversation} aria-label="新建 AI 对话">
+            <Plus size={15} />
+          </button>
+          <button type="button" onClick={() => setHistoryOpen(true)} aria-label="历史记录">
+            <History size={16} />
+          </button>
+          <button type="button" onClick={onCollapse} aria-label="收起 DM AI">
+            <PanelRightClose size={16} />
+          </button>
         </div>
       </header>
+      {historyOpen && (
+        <section className="ai-history-panel">
+          <div className="ai-history-header">
+            <strong>历史记录</strong>
+            <button type="button" onClick={() => setHistoryOpen(false)} aria-label="关闭历史记录">
+              <X size={16} />
+            </button>
+          </div>
+          <label className="ai-history-search">
+            <Search size={14} />
+            <input placeholder="搜索历史会话" />
+          </label>
+          <div className="ai-history-tabs">
+            <button className="active" type="button">全部</button>
+          </div>
+          <span className="ai-history-period">近一周</span>
+          <div className="ai-history-list">
+            {sortedConversations.map((conversation) => (
+              <article
+                className={`ai-history-item ${conversation.id === activeConversationId ? 'active' : ''}`}
+                key={conversation.id}
+              >
+                <button
+                  className="ai-history-title"
+                  type="button"
+                  onClick={() => {
+                    onOpenConversation(conversation);
+                    setHistoryOpen(false);
+                  }}
+                >
+                  <strong>{conversation.title}</strong>
+                  <span>{conversation.pinned ? '置顶' : conversation.updatedAt}</span>
+                </button>
+                <button
+                  className="ai-history-more"
+                  type="button"
+                  onClick={() => setConversationMenuId(conversationMenuId === conversation.id ? null : conversation.id)}
+                  aria-label={`${conversation.title} 更多操作`}
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+                {conversationMenuId === conversation.id && (
+                  <div className="ai-history-menu">
+                    <button type="button" onClick={() => onToggleConversationPin(conversation.id)}>
+                      <BookmarkPlus size={14} />
+                      {conversation.pinned ? '取消置顶' : '置顶'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextTitle = window.prompt('重命名会话', conversation.title);
+                        if (nextTitle) onRenameConversation(conversation.id, nextTitle);
+                        setConversationMenuId(null);
+                      }}
+                    >
+                      <SquarePen size={14} />
+                      重命名
+                    </button>
+                    <button type="button" onClick={() => onDeleteConversation(conversation.id)}>
+                      <Trash2 size={14} />
+                      删除会话
+                    </button>
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
       <section className="chat-log">
         {formulaPanelMode && (
           <AuditPanel

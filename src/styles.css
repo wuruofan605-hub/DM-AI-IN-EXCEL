@@ -423,6 +423,10 @@ button {
   overflow: hidden;
 }
 
+.workspace.ai-collapsed {
+  grid-template-columns: 205px minmax(720px, 1fr) 54px;
+}
+
 .left-rail {
   display: flex;
   flex-direction: column;
@@ -1224,6 +1228,7 @@ button {
 }
 
 .ai-panel {
+  position: relative;
   display: grid;
   grid-template-rows: 52px 1fr 172px;
   min-width: 0;
@@ -1248,6 +1253,194 @@ button {
 
 .panel-icons {
   color: #65748b;
+}
+
+.panel-icons button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  color: #65748b;
+  background: transparent;
+}
+
+.panel-icons button:hover {
+  color: #0f5fb8;
+  background: #eef5ff;
+}
+
+.ai-collapsed-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  min-height: 0;
+  padding-top: 16px;
+  border-left: 1px solid #d9dde6;
+  color: #0d3b73;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ai-collapsed-tab svg {
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  border-radius: 8px;
+  background: #e8f2ff;
+}
+
+.ai-history-panel {
+  position: absolute;
+  top: 52px;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 400px;
+  max-width: min(400px, 92vw);
+  height: calc(100% - 52px);
+  padding: 18px 18px 16px;
+  border-left: 1px solid #e3e7ee;
+  background: #ffffff;
+  box-shadow: -18px 0 32px rgba(15, 35, 68, 0.13);
+}
+
+.ai-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.ai-history-header strong {
+  color: #101828;
+  font-size: 18px;
+}
+
+.ai-history-header button,
+.ai-history-more {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  color: #52627a;
+  background: transparent;
+}
+
+.ai-history-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 5px;
+  background: #f2f4f7;
+  color: #98a2b3;
+}
+
+.ai-history-search input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 14px;
+}
+
+.ai-history-tabs {
+  display: flex;
+  gap: 16px;
+  margin: 16px 0 10px;
+}
+
+.ai-history-tabs button {
+  padding: 0;
+  color: #344054;
+  background: transparent;
+  font-weight: 700;
+}
+
+.ai-history-tabs .active {
+  color: #101828;
+}
+
+.ai-history-period {
+  color: #667085;
+  font-size: 13px;
+}
+
+.ai-history-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.ai-history-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  min-height: 42px;
+  border-radius: 6px;
+}
+
+.ai-history-item.active,
+.ai-history-item:hover {
+  background: #f2f4f7;
+}
+
+.ai-history-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  text-align: left;
+  background: transparent;
+}
+
+.ai-history-title strong {
+  overflow: hidden;
+  color: #101828;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-history-title span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.ai-history-menu {
+  position: absolute;
+  top: 34px;
+  right: 10px;
+  z-index: 35;
+  display: grid;
+  min-width: 126px;
+  padding: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+}
+
+.ai-history-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 4px;
+  color: #344054;
+  background: transparent;
+  text-align: left;
+}
+
+.ai-history-menu button:hover {
+  background: #f2f4f7;
 }
 
 .chat-log {
